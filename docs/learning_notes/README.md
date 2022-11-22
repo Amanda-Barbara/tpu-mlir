@@ -9,7 +9,13 @@
 * 通过高级语言可以更高效地编程，语言转换的工作直接交给编译器完成就行。传统编译器和 AI 编译器的主要区别是，前者的主要目的是为了降低编程难度，而 AI 编译器虽然也起到了简化网络搭建难度的作用，但最主要的功能是提升网络性能。
 * TPU 芯片加速本质上是把一个模型拆成一个个算子，然后对每个算子进行转换，最后变成我们芯片可以理解的指令，模型的本质就是数据在一个个算子之间进行运算，然后传递到下一个算子，最后输出结果。
 
+* AI编译器呼之欲出的需求与困境
+
+![](summary/data/difference_memory_layout_with_hardwares.png)
+
 ![](summary/data/AI-compiler.png)
+
+![](summary/data/difference_memory_layout_with_hardwares.png)
 
 ## [慢条斯理](summary/README.md)
 
@@ -26,3 +32,4 @@
 
 ## 参考链接
 * 1 [`tpu-mlir`总体介绍](https://tpumlir.org/zh-cn/2022/08/26/tpu-mlir-zheng-shi-kai-yuan-gen-suan-neng-yi-qi-da-zao-xia-yi-dai-ai-bian-yi-qi.html)
+* 2 [`tpu-mlir`官方文档](https://tpumlir.org/)
