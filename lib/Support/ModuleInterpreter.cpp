@@ -8,26 +8,21 @@
 //===----------------------------------------------------------------------===//
 
 #include "tpu_mlir/Support/ModuleInterpreter.h"
-#include "tpu_mlir/Support/MathUtils.h"
 #include "tpu_mlir/Dialect/Top/IR/TopOps.h"
 #include "tpu_mlir/Dialect/Tpu/IR/TpuOps.h"
-#include "tpu_mlir/Support/Helper/Quant.h"
-#include "tpu_mlir/Support/Helper/Module.h"
+#include "tpu_mlir/Support/Module.h"
+#include "tpu_mlir/Support/MathUtils.h"
 
-#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include <algorithm>
 #include <functional>
 #include <memory>
 #include <numeric>
 
-using namespace mlir;
-using namespace mlir::func;
-using namespace tpu_mlir::helper;
-
 namespace tpu_mlir {
 ModuleInterpreter::ModuleInterpreter(ModuleOp module) : module(module) {
-  state = Module::getState(module);
-  if (state != Module::State::TOP_F32 && state != Module::State::TPU_LOWERED) {
+  module::init(module);
+  if (!module::isState(module::State::TOP_F32) &&
+      !module::isState(module::State::TPU_LOWERED)) {
     llvm_unreachable("mlir state not support");
   }
 }
@@ -36,7 +31,7 @@ ModuleInterpreter::~ModuleInterpreter() {
   for (auto func : module.getOps<FuncOp>()) {
     func.walk([&](Operation *op) {
       if (auto infer_op = llvm::dyn_cast<InferenceInterface>(op)) {
-        auto name = Module::getName(op).str();
+        auto name = module::getName(op).str();
         infer_op.deinit(*inference_map[name]);
       }
     });
@@ -55,16 +50,19 @@ void ModuleInterpreter::allocate_resources() {
     func.walk([&](Operation *op) {
       if (op == func.getOperation() || isa<top::NoneOp>(op)) {
         // self
-      } else if (isa<func::ReturnOp>(op)) {
+      } else if (isa<ReturnOp>(op)) {
         for (auto v : op->getOperands()) {
-          auto name = Module::getName(v).str();
+          auto name = module::getName(v).str();
           output_names.push_back(name);
         }
       } else {
         for (auto result : op->getResults()) {
+          if (result.getType().isa<NoneType>()) {
+            continue;
+          }
           auto type = result.getType().cast<RankedTensorType>();
           auto count = type.getNumElements();
-          auto name = Module::getName(result).str();
+          auto name = module::getName(result).str();
           value_map[name] = result;
           if (auto wOp = llvm::dyn_cast<top::WeightOp>(op)) {
             mem_map[name] = wOp.read_as_float();
@@ -90,18 +88,22 @@ void ModuleInterpreter::allocate_resources() {
     // input output buffers for all ops
     func.walk([&](Operation *op) {
       if (auto infer_op = llvm::dyn_cast<InferenceInterface>(op)) {
-        auto name = Module::getName(op).str();
+        auto name = module::getName(op).str();
         auto param = std::make_shared<InferenceParameter>();
         for (auto result : op->getResults()) {
-          auto o_name = Module::getName(result).str();
-          param->outputs.push_back(mem_map[o_name]->data());
+          if (result.getType().isa<NoneType>()) {
+            param->outputs.push_back(nullptr);
+          } else {
+            auto o_name = module::getName(result).str();
+            param->outputs.push_back(mem_map[o_name]->data());
+          }
         }
         for (auto input : op->getOperands()) {
           if (input.getType().isa<NoneType>()) {
             param->inputs.push_back(nullptr);
             continue;
           }
-          auto input_name = Module::getName(input).str();
+          auto input_name = module::getName(input).str();
           if (mem_map.find(input_name) == mem_map.end()) {
             input.dump();
             llvm_unreachable("input operands not allocated");
@@ -127,7 +129,7 @@ void ModuleInterpreter::fake_quant_weight() {
       if (isa<top::ConvOp>(op) || isa<top::MatMulOp>(op)) {
         auto bias_op = op->getOperands()[2].getDefiningOp();
         if (auto weight_op = dyn_cast<top::WeightOp>(bias_op)) {
-          not_quant_weight_names.push_back(Module::getName(bias_op).str());
+          not_quant_weight_names.push_back(module::getName(bias_op).str());
         }
       }
     });
@@ -152,19 +154,19 @@ void ModuleInterpreter::fake_quant_weight() {
 void ModuleInterpreter::invoke(bool express_type) {
   for (auto func : module.getOps<FuncOp>()) {
     func.walk([&](InferenceInterface infer_op) {
-      auto name = Module::getName(infer_op.getOperation()).str();
+      auto name = module::getName(infer_op.getOperation()).str();
       if (failed(infer_op.inference(*inference_map[name]))) {
         infer_op.dump();
         llvm_unreachable("invoke failed!!");
       }
     });
   }
-  if (express_type && state == Module::State::TPU_LOWERED) {
+  if (express_type && module::isState(module::State::TPU_LOWERED)) {
     for (auto &name : all_tensor_names) {
       auto mem = mem_map.at(name);
       auto value = value_map.at(name);
-      if (Quant::isUniformQuantized(value)) {
-        auto qtype = Quant::getUniformQuantizedType(value);
+      if (module::isUniformQuantized(value)) {
+        auto qtype = module::getUniformQuantizedType(value);
         for (auto &data : *mem) {
           data = (data - (float)qtype.getZeroPoint()) * (float)qtype.getScale();
         }
@@ -175,7 +177,7 @@ void ModuleInterpreter::invoke(bool express_type) {
 
 std::shared_ptr<std::vector<float>>
 ModuleInterpreter::invoke_at(const std::string op_name) {
-  if (state != Module::State::TOP_F32) {
+  if (!module::isState(module::State::TOP_F32)) {
     llvm_unreachable("invoke_at failed!!");
   }
   if (value_map.find(op_name) == value_map.end()) {
@@ -212,13 +214,13 @@ void ModuleInterpreter::setTensor(const std::string &name, const void *data,
     llvm_unreachable("Error, setTensor failed");
   }
   auto value = value_map.at(name);
-  if (is_integer == false && Quant::isUniformQuantized(value)) {
-    auto qtype = Quant::getUniformQuantizedType(value);
+  if (is_integer == false && module::isUniformQuantized(value)) {
+    auto qtype = module::getUniformQuantizedType(value);
     float *p = (float *)data;
     for (uint32_t i = 0; i < act->size(); i++) {
       float d =
           p[i] * (float)(1 / qtype.getScale()) + (float)qtype.getZeroPoint();
-      act->at(i) = qtype.isSigned() ? Quant::to_int8(d) : Quant::to_uint8(d);
+      act->at(i) = qtype.isSigned() ? to_int8(d) : to_uint8(d);
     }
   } else {
     memcpy(act->data(), data, size);

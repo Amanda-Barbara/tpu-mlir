@@ -9,13 +9,11 @@
 
 #include "tpu_mlir/Dialect/Tpu/IR/TpuOps.h"
 #include "tpu_mlir/Support/Dnnl/Dnnl.h"
-#include "tpu_mlir/Support/Helper/Module.h"
-#include "tpu_mlir/Support/Helper/Quant.h"
+#include "tpu_mlir/Support/Module.h"
+
 #include "tpu_mlir/Support/MathUtils.h"
 
-using namespace tpu_mlir;
-using namespace tpu_mlir::helper;
-using namespace mlir;
+
 
 LogicalResult tpu::DequantIntOp::init(InferenceParameter &p) {
   return success();
@@ -23,13 +21,13 @@ LogicalResult tpu::DequantIntOp::init(InferenceParameter &p) {
 void tpu::DequantIntOp::deinit(InferenceParameter &p) {}
 
 LogicalResult tpu::DequantIntOp::inference(InferenceParameter &p) {
-  auto o_sType = Module::getStorageType(output());
-  auto qtype = Quant::getUniformQuantizedType(input());
-  int64_t num_elem = Module::getNumElements(input());
-  int64_t shift_val = shift();
-  int64_t mul_val = multiplier();
+  auto o_sType = module::getStorageType(getOutput());
+  auto qtype = module::getUniformQuantizedType(getInput());
+  int64_t num_elem = module::getNumElements(getInput());
+  int64_t shift_val = getShift();
+  int64_t mul_val = getMultiplier();
   int64_t offset = (int64_t)qtype.getZeroPoint();
-  auto qmode = quant_mode();
+  auto qmode = getQuantMode();
   switch (qmode) {
   case DequantMode::Normal: {
 #pragma omp parallel for schedule(static, omp_schedule(num_elem))
@@ -40,7 +38,7 @@ LogicalResult tpu::DequantIntOp::inference(InferenceParameter &p) {
     }
   } break;
   case DequantMode::TFlite: {
-    int64_t lshift_val = lshift();
+    int64_t lshift_val = getLshift();
 #pragma omp parallel for schedule(static, omp_schedule(num_elem))
     for (int64_t idx = 0; idx < num_elem; idx++) {
       int64_t tmp = ((int32_t)p.inputs[0][idx] - offset) * mul_val
@@ -61,7 +59,7 @@ mlir::Type tpu::DequantIntOp::type_verify(uint64_t opd_idx,
                                           TypeCastMode &mode) {
   if (opd_idx == 0) {
     auto op = getOperation();
-    auto stype = Module::getStorageType(input());
+    auto stype = module::getStorageType(getInput());
     if (stype.isIntOrIndex()) {
       return do_nothing(mode);
     }

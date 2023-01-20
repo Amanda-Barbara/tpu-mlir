@@ -76,7 +76,7 @@ class BmodelReader:
             0: opdef_1684x.DType.f32,
             1: opdef_1684x.DType.f16,
             2: opdef_1684x.DType.i8,
-            3: opdef_1684x.DType.u8,
+            3: opdef_1684x.DType.ui8,
             4: opdef_1684x.DType.i16,
             5: opdef_1684x.DType.u16,
             6: opdef_1684x.DType.i32,
@@ -204,7 +204,7 @@ class Region:
     def __init__(self, net_stage):
         self.blocks = [Block(id, x) for id, x in enumerate(net_stage["SubNet"])]
         self.signature = (net_stage["InputTensor"], net_stage["OutputTensor"])
-        self.data = net_stage["CoeffMem"][0]
+        self.data = net_stage["CoeffMem"][0] if net_stage["CoeffMem"] else None
 
     def __repr__(self):
         blocks = "\n".join([f"{b}" for b in self.blocks])

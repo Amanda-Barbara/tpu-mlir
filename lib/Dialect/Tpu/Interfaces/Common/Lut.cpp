@@ -9,41 +9,27 @@
 
 #include "tpu_mlir/Dialect/Tpu/IR/TpuOps.h"
 #include "tpu_mlir/Support/Dnnl/Dnnl.h"
-#include "tpu_mlir/Support/Helper/Module.h"
-#include "tpu_mlir/Support/Helper/Quant.h"
+#include "tpu_mlir/Support/Module.h"
+
 #include "tpu_mlir/Support/LutFunc.h"
 #include "tpu_mlir/Support/MathUtils.h"
 
-using namespace tpu_mlir;
-using namespace tpu_mlir::helper;
-using namespace mlir;
+
 
 LogicalResult tpu::LutOp::init(InferenceParameter &p) { return success(); }
 void tpu::LutOp::deinit(InferenceParameter &p) {}
 
 LogicalResult tpu::LutOp::inference(InferenceParameter &p) {
-  auto num_element = Module::getNumElements(input());
-  auto chip = Module::getChip(getOperation());
-  bool is_cv18xx = Module::isCV18xx(chip);
-  if (Quant::isUniformQuantized(input())) {
-    auto stype = Module::getStorageType(input());
+  auto num_element = module::getNumElements(getInput());
+  auto stype = module::getStorageType(getInput());
 #pragma omp parallel for schedule(static, omp_schedule(num_element))
-    for (int i = 0; i < num_element; ++i) {
-      int offset = p.inputs[0][i];
-      if (offset < 0) {
-        offset += 256;
-      }
-      assert(offset >= 0 && offset <= 255);
-      p.outputs[0][i] = p.inputs[1][offset];
+  for (int i = 0; i < num_element; ++i) {
+    int offset = p.inputs[0][i];
+    if (offset < 0) {
+      offset += 256;
     }
-  } else {
-    if (is_cv18xx) {
-      bf16_lut_slope(p.inputs[0], p.outputs[0], num_element, p.inputs[1],
-                     p.inputs[2], min_range().convertToDouble(),
-                     max_range().convertToDouble());
-    } else {
-      llvm_unreachable("not support");
-    }
+    assert(offset >= 0 && offset <= 255);
+    p.outputs[0][i] = p.inputs[1][offset];
   }
   return success();
 }

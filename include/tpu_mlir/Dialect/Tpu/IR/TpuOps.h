@@ -18,17 +18,22 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "tpu_mlir/Interfaces/InferenceInterface.h"
-#include "tpu_mlir/Interfaces/WeightReorderInterface.h"
 #include "tpu_mlir/Interfaces/LocalGenInterface.h"
 #include "tpu_mlir/Interfaces/GlobalGenInterface.h"
 #include "tpu_mlir/Interfaces/TypeInterface.h"
 #include "tpu_mlir/Support/TensorFile.h"
+#include "tpu_mlir/Support/AttrStruct.h"
 #include "tpu_mlir/Traits/Traits.h"
 #include "tpu_mlir/Dialect/Tpu/IR/TpuOpsDialect.h.inc"
-#include "tpu_mlir/Dialect/Tpu/Transforms/LayerGroup/TimeStep.h"
 
 #include "tpu_mlir/Dialect/Tpu/IR/TpuEnum.h.inc"
 #define GET_ATTRDEF_CLASSES
 #include "tpu_mlir/Dialect/Tpu/IR/TpuAttr.h.inc"
 #define GET_OP_CLASSES
 #include "tpu_mlir/Dialect/Tpu/IR/TpuOps.h.inc"
+
+namespace tpu_mlir {
+const conv_attr_t &getConv2DParam(tpu::Conv2DOp &op);
+const deconv_attr_t &getDeconvParam(tpu::DeconvOp &op);
+const pool_attr_t &getPool2DParam(tpu::Pool2DOp &op);
+} // namespace tpu_mlir

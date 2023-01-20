@@ -1,43 +1,72 @@
 #!/bin/bash
-# full test: run_model.sh mobilenet_v2
-# basic test: run_model.sh mobilenet_v2 0
 set -ex
 
-DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+# all test (f32/f16/bf16/int8): run_model.sh mobilenet_v2 bm1684x all 1/0
+# basic test (f32/int8): run_model.sh mobilenet_v2 bm1684x basic 1/0
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 
 model_name=$1
-full_test=$2
+chip_name=$2
+test_type=$3
+dyn_mode=$4
 if [ x$1 == x ]; then
-  echo "Error: $0 model_name"
+  echo "Error: $0 model_name [bm1684x|cv183x]"
   exit 1
 fi
 
-cfg_file=$REGRESSION_PATH/config/$1.cfg
+if [ x$2 == x ]; then
+  chip_name=bm1684x
+fi
+
+if [ x$test_type == x ]; then
+  test_type=all
+fi
+
+if [ x$3 == x ]; then
+  test_type=all
+fi
+
+if [ x$4 == x ]; then
+  dyn_mode=0
+fi
+
+source $REGRESSION_PATH/chip.cfg
+eval do_f32=\${${chip_name}_support_f32}
+eval do_bf16=\${${chip_name}_support_bf16}
+eval do_f16=\${${chip_name}_support_f16}
+eval do_asymmetric=\${${chip_name}_support_asym}
+eval do_symmetric=\${${chip_name}_support_sym}
+eval support_dynamic=\${${chip_name}_support_dyn}
+eval model_type=\${${chip_name}_model_type}
+
+if [ x${model_type} == x ]; then
+  echo "Error: chip ${chip_name} not support in chip.cfg"
+  exit 1
+fi
+
+# basic test don't run bf16/f16
+if [ x${test_type} == xbasic ]; then
+  do_f16=0
+  do_bf16=0
+fi
+
+cfg_file=$REGRESSION_PATH/config/${model_name}.cfg
 
 if [ ! -f $cfg_file ]; then
   echo "Error: can't open config file ${cfg_file}"
   exit 1
 fi
 
-if [ x${full_test} == x0 ]; then
-  do_f32=1
-  do_f16=0
-  do_bf16=0
-  do_cali=1
-  do_symmetric=1
-  do_asymmetric=1
+source ${cfg_file}
+if [ x$do_dynamic == x1 ] && [ x$support_dynamic == x1]; then
+  do_dynamic=1
 else
-  do_f32=1
-  do_f16=1
-  do_bf16=1
-  do_cali=1
-  do_symmetric=1
-  do_asymmetric=1
+  do_dynamic=0
 fi
 
-source ${cfg_file}
 
-NET_DIR=$REGRESSION_PATH/regression_out/${model_name}
+NET_DIR=$REGRESSION_PATH/regression_out/${model_name}_${chip_name}
 mkdir -p $NET_DIR
 pushd $NET_DIR
 
@@ -64,6 +93,7 @@ if echo ${model_path} | grep -q -E '\.prototxt$'; then
 fi
 
 # tflite model
+do_cali=1
 if echo ${model_path} | grep -q -E '\.tflite$'; then
   do_cali=0
   do_f32=0
@@ -71,6 +101,7 @@ if echo ${model_path} | grep -q -E '\.tflite$'; then
   do_bf16=0
   do_symmetric=0
   do_asymmetric=1
+  do_dynamic=0
 fi
 
 excepts_opt=
@@ -118,6 +149,21 @@ if [ x${channel_format} != x ]; then
   channel_format_opt="--channel_format=${channel_format}"
 fi
 
+pad_value_opt=
+if [ x${pad_value} != x ]; then
+  pad_value_opt="--pad_value=${pad_value}"
+fi
+
+pad_type_opt=
+if [ x${pad_type} != x ]; then
+  pad_type_opt="--pad_type=${pad_type}"
+fi
+
+model_format_opt=
+if [ x${model_format} != x ]; then
+  model_format_opt="--model_format=${model_format}"
+fi
+
 test_input_opt=
 test_result_opt=
 test_innpz_opt=
@@ -142,6 +188,9 @@ model_transform.py \
   ${scale_opt} \
   ${pixel_format_opt} \
   ${channel_format_opt} \
+  ${pad_value_opt} \
+  ${pad_type_opt} \
+  ${model_format_opt} \
   ${test_input_opt} \
   ${test_result_opt} \
   ${excepts_opt} \
@@ -151,40 +200,41 @@ model_transform.py \
 # deploy to float bmodel
 #########################
 if [ ${do_f32} == 1 ]; then
-model_deploy.py \
-  --mlir ${model_name}.mlir \
-  --quantize F32 \
-  --chip bm1684x \
-  ${test_innpz_opt} \
-  ${test_reference_opt} \
-  ${excepts_opt} \
-  --tolerance 0.99,0.99 \
-  --model ${model_name}_bm1684x_f32.bmodel
+  model_deploy.py \
+    --mlir ${model_name}.mlir \
+    --quantize F32 \
+    --chip ${chip_name} \
+    ${test_innpz_opt} \
+    ${test_reference_opt} \
+    ${excepts_opt} \
+    --tolerance 0.99,0.99 \
+    --model ${model_name}_${chip_name}_f32.${model_type}
 fi
 
 if [ ${do_f16} == 1 ]; then
-model_deploy.py \
-  --mlir ${model_name}.mlir \
-  --quantize F16 \
-  --chip bm1684x \
-  ${test_innpz_opt} \
-  ${test_reference_opt} \
-  ${excepts_opt} \
-  --tolerance 0.95,0.85 \
-  --model ${model_name}_bm1684x_f16.bmodel
+  model_deploy.py \
+    --mlir ${model_name}.mlir \
+    --quantize F16 \
+    --chip ${chip_name} \
+    ${test_innpz_opt} \
+    ${test_reference_opt} \
+    ${excepts_opt} \
+    --tolerance 0.95,0.85 \
+    --model ${model_name}_${chip_name}_f16.${model_type}
 fi
 
 if [ ${do_bf16} == 1 ]; then
-model_deploy.py \
-  --mlir ${model_name}.mlir \
-  --quantize BF16 \
-  --chip bm1684x \
-  ${test_innpz_opt} \
-  ${test_reference_opt} \
-  ${excepts_opt} \
-  --tolerance 0.95,0.85 \
-  --model ${model_name}_bm1684x_bf16.bmodel
+  model_deploy.py \
+    --mlir ${model_name}.mlir \
+    --quantize BF16 \
+    --chip ${chip_name} \
+    ${test_innpz_opt} \
+    ${test_reference_opt} \
+    ${excepts_opt} \
+    --tolerance 0.95,0.85 \
+    --model ${model_name}_${chip_name}_bf16.${model_type}
 fi
+
 #########################
 # deploy to int8 bmodel
 #########################
@@ -220,78 +270,170 @@ fi
 # to symmetric
 if [ ${do_symmetric} == 1 ]; then
 
-tolerance_sym_opt=
-if [ x${int8_sym_tolerance} != x ]; then
-  tolerance_sym_opt="--tolerance ${int8_sym_tolerance}"
-fi
-model_deploy.py \
-  --mlir ${model_name}.mlir \
-  --quantize INT8 \
-  ${cali_opt} \
-  ${qtable_opt} \
-  --chip bm1684x \
-  ${test_innpz_opt} \
-  ${test_reference_opt} \
-  ${tolerance_sym_opt} \
-  ${excepts_opt} \
-  --quant_input \
-  --quant_output \
-  --model ${model_name}_bm1684x_int8_sym.bmodel
+  tolerance_sym_opt=
+  if [ x${int8_sym_tolerance} != x ]; then
+    tolerance_sym_opt="--tolerance ${int8_sym_tolerance}"
+  fi
+  model_deploy.py \
+    --mlir ${model_name}.mlir \
+    --quantize INT8 \
+    ${cali_opt} \
+    ${qtable_opt} \
+    --chip ${chip_name} \
+    ${test_innpz_opt} \
+    ${test_reference_opt} \
+    ${tolerance_sym_opt} \
+    ${excepts_opt} \
+    --quant_input \
+    --quant_output \
+    --model ${model_name}_${chip_name}_int8_sym.${model_type}
 
 fi #do_symmetric
 
 # to asymmetric
 if [ $do_asymmetric == 1 ]; then
 
-tolerance_asym_opt=
-if [ x${int8_asym_tolerance} != x ]; then
-  tolerance_asym_opt="--tolerance ${int8_asym_tolerance}"
-fi
-model_deploy.py \
-  --mlir ${model_name}.mlir \
-  --quantize INT8 \
-  --asymmetric \
-  ${cali_opt} \
-  ${qtable_opt} \
-  --chip bm1684x \
-  ${test_innpz_opt} \
-  ${test_reference_opt} \
-  ${tolerance_asym_opt} \
-  ${excepts_opt} \
-  --model ${model_name}_bm1684x_int8_asym.bmodel
+  tolerance_asym_opt=
+  if [ x${int8_asym_tolerance} != x ]; then
+    tolerance_asym_opt="--tolerance ${int8_asym_tolerance}"
+  fi
+  model_deploy.py \
+    --mlir ${model_name}.mlir \
+    --quantize INT8 \
+    --asymmetric \
+    ${cali_opt} \
+    ${qtable_opt} \
+    --chip ${chip_name} \
+    ${test_innpz_opt} \
+    ${test_reference_opt} \
+    ${tolerance_asym_opt} \
+    ${excepts_opt} \
+    --model ${model_name}_${chip_name}_int8_asym.${model_type}
 
 fi #do_asymmetric
 
 #########################
+# deploy to dynamic bmodel
+#########################
+if [ $do_dynamic == 1 ]; then
+
+  dynamic_shapes_opt="--input_shapes=${dynamic_shapes}"
+  static_model_name=${model_name}_static
+  dynamic_model_name=${model_name}_dynamic
+  model_transform.py \
+    --model_name ${static_model_name} \
+    ${model_def_opt} \
+    ${model_data_opt} \
+    ${output_names_opt} \
+    ${dynamic_shapes_opt} \
+    ${resize_dims_opt} \
+    ${keep_aspect_ratio_opt} \
+    ${mean_opt} \
+    ${scale_opt} \
+    ${pixel_format_opt} \
+    ${channel_format_opt} \
+    ${pad_value_opt} \
+    ${pad_type_opt} \
+    ${model_format_opt} \
+    ${test_input_opt} \
+    ${test_result_opt} \
+    ${excepts_opt} \
+    --mlir ${static_model_name}.mlir
+
+  static_input_npz=${static_model_name}_in_f32.npz
+
+  if [ ${do_f32} == 1 ]; then
+    static_model=${static_model_name}_${chip_name}_f32.${model_type}
+    dynamic_model=${dynamic_model_name}_${chip_name}_f32.${model_type}
+    model_deploy.py \
+      --mlir ${static_model_name}.mlir \
+      --quantize F32 \
+      --chip ${chip_name} \
+      --model ${static_model}
+
+    model_deploy.py \
+      --mlir ${model_name}.mlir \
+      --quantize F32 \
+      --chip ${chip_name} \
+      --dynamic \
+      ${test_innpz_opt} \
+      ${test_reference_opt} \
+      ${excepts_opt} \
+      --tolerance 0.99,0.99 \
+      --model ${dynamic_model}
+
+    model_runner.py --input ${static_input_npz} \
+                --model ${static_model} \
+                --output ${static_model_name}_out_f32.npz
+    model_runner.py --input ${static_input_npz} \
+                --model ${dynamic_model} \
+                --output ${dynamic_model_name}_out_f32.npz
+    npz_tool.py compare ${static_model_name}_out_f32.npz \
+                ${dynamic_model_name}_out_f32.npz -vv
+  fi
+
+  # if [ ${do_f16} == 1 ]; then
+  #   model_deploy.py \
+  #     --mlir ${model_name}.mlir \
+  #     --quantize F16 \
+  #     --chip ${chip_name} \
+  #     --dynamic \
+  #     ${test_innpz_opt} \
+  #     ${test_reference_opt} \
+  #     ${excepts_opt} \
+  #     --tolerance 0.95,0.85 \
+  #     --model ${model_name}_${chip_name}_f16.${model_type}
+  # fi
+
+  # if [ ${do_bf16} == 1 ]; then
+  #   model_deploy.py \
+  #     --mlir ${model_name}.mlir \
+  #     --quantize BF16 \
+  #     --chip ${chip_name} \
+  #     --dynamic \
+  #     ${test_innpz_opt} \
+  #     ${test_reference_opt} \
+  #     ${excepts_opt} \
+  #     --tolerance 0.95,0.85 \
+  #     --model ${model_name}_${chip_name}_bf16.${model_type}
+  # fi
+
+fi #do_dynamic
+
+#########################
 # app
 #########################
-if [ x${app} != x ]; then
+if [ x${app} != x ] && [ x${chip_name} != xcv183x ]; then
 
-# by onnx
-${app} \
-  --input ${test_input} \
-  --model ${model_path} \
-  --output output_onnx.jpg
+  # by onnx
+  ${app} \
+    --input ${test_input} \
+    --model ${model_path} \
+    --output output_onnx.jpg
 
-# by f32 bmodel
-${app} \
-  --input ${test_input} \
-  --model ${model_name}_bm1684x_f32.bmodel \
-  --output output_f32.jpg
+  # by f32 bmodel
+  if [ x${do_f32} == x1 ]; then
+    ${app} \
+      --input ${test_input} \
+      --model ${model_name}_${chip_name}_f32.${model_type} \
+      --output output_f32.jpg
+  fi
 
-# by int8 symmetric bmodel
-${app} \
-  --input ${test_input} \
-  --model ${model_name}_bm1684x_int8_sym.bmodel \
-  --output output_int8_sym.jpg
+  # by int8 symmetric bmodel
+  if [ x${do_symmetric} == x1 ]; then
+    ${app} \
+      --input ${test_input} \
+      --model ${model_name}_${chip_name}_int8_sym.${model_type} \
+      --output output_int8_sym.jpg
+  fi
 
-if [ $do_asymmetric == 1 ]; then
-# by int8 asymmetric bmodel
-${app} \
-  --input ${test_input} \
-  --model ${model_name}_bm1684x_int8_asym.bmodel \
-  --output output_int8_asym.jpg
-fi
+  if [ $do_asymmetric == 1 ]; then
+    # by int8 asymmetric bmodel
+    ${app} \
+      --input ${test_input} \
+      --model ${model_name}_${chip_name}_int8_asym.${model_type} \
+      --output output_int8_asym.jpg
+  fi
 
 fi
 

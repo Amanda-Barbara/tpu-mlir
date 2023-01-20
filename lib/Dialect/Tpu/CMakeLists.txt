@@ -1,12 +1,13 @@
 file(GLOB _sources
           IR/*.cpp
           Interfaces/BM1684/*.cpp
-          Interfaces/BM1684x/*.cpp
+          Interfaces/BM1684X/*.cpp
           Interfaces/CV18xx/*.cpp
           Interfaces/Common/*.cpp
           Canonicalize/*.cpp
           Transforms/*.cpp
           Transforms/BM168x/*.cpp
+          Transforms/BM1684/*.cpp
           Transforms/CV18xx/*.cpp
           Transforms/LayerGroup/*.cpp)
 
@@ -23,9 +24,10 @@ add_llvm_library(TPUMLIRTpu
   MLIRTpuPassIncGen
   MLIRTpuAttrGen
   MLIRInferenceInterfaceIncGen
-  MLIRWeightReorderInterfaceIncGen
   MLIRGlobalGenInterfaceIncGen
   MLIRLocalGenInterfaceIncGen
+  MLIRDynLocalGenInterfaceIncGen
+  MLIRDynGlobalGenInterfaceIncGen
   MLIRTypeInterfaceIncGen
 
   LINK_LIBS PUBLIC
@@ -39,9 +41,10 @@ add_llvm_library(TPUMLIRTpu
   MLIRTransforms
   MLIRSideEffectInterfaces
   MLIRInferenceInterface
-  MLIRWeightReorderInterface
   MLIRGlobalGenInterface
   MLIRLocalGenInterface
+  MLIRDynLocalGenInterface
+  MLIRDynGlobalGenInterface
   MLIRTypeInterface
   TPUMLIRSupport
   TPUMLIRTrait

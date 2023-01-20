@@ -8,8 +8,8 @@
 //===----------------------------------------------------------------------===//
 
 #pragma once
-#include "mlir/IR/Builders.h"
-#include "llvm/Support/DynamicLibrary.h"
+
+#include "tpu_mlir/Backend/Arch.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -97,8 +97,7 @@ typedef struct bmcompiler_mem_info {
 } bm_mem_desc_t;
 typedef struct bmcompiler_mem_info bm_device_mem_t;
 
-static constexpr int MAX_SHAPE_DIMS = 8;
-
+#define MAX_SHAPE_DIMS 8
 typedef struct local_tensor_spec {
   uint64_t addr;
   int32_t dtype;
@@ -261,6 +260,97 @@ typedef struct constbinary_local_param {
   constbinary_local_spec_t spec;
 } constbinary_local_param_t;
 
+typedef struct bcbinary_common_spec {
+  int32_t binary_type;
+  int32_t if_relu;
+  float relu_upper_limit;
+  int32_t scale_A;
+  int32_t scale_B;
+  int32_t rshift_A;
+  int32_t rshift_B;
+} bcbinary_common_spec_t;
+
+typedef struct bcbinary_local_spec {
+  bcbinary_common_spec_t common;
+  uint32_t buffer_addr;
+} bcbinary_local_spec_t;
+
+typedef struct bcbinary_local_param {
+  bcbinary_local_spec_t spec;
+  int32_t A_is_coeff;
+  int32_t B_is_coeff;
+} bcbinary_local_param_t;
+
+typedef struct {
+  uint64_t input_A_global_addr;
+  uint64_t input_B_global_addr;
+  uint64_t output_global_addr;
+  int n;
+  int c;
+  int h;
+  int w;
+  int op_code;
+  int scale_A;
+  int scale_B;
+  int rshift_A;
+  int rshift_B;
+  int if_relu;
+  DATA_TYPE_T dtype_A;
+  DATA_TYPE_T dtype_B;
+  int round_mode;
+} eltwise_fixed_global_param_t;
+
+typedef struct {
+  uint64_t *input_global_addr;
+  uint64_t output_global_addr;
+  uint64_t mask_global_addr;
+  int input_num;
+  int n;
+  int c;
+  int h;
+  int w;
+  int op_code;
+  int *coeff;
+  int need_mask;
+  int *mask_index;
+  int if_relu;
+  DATA_TYPE_T dtype;
+} eltwise_float_global_param_t;
+
+typedef struct {
+  uint32_t *input_local_addr;
+  uint32_t output_local_addr;
+  uint32_t buffer_local_addr;
+  int n;
+  int c;
+  int h;
+  int w;
+  int op_code;
+  int *input_local_cstride;
+  int *scale_weight;
+  int *rshift;
+  DATA_TYPE_T *input_dtype;
+  int input_num;
+  int if_relu;
+  int round_mode;
+} eltwise_fixed_local_param_t;
+
+typedef struct {
+  uint32_t *input_local_addr;
+  uint32_t output_local_addr;
+  uint32_t buffer_local_addr;
+  int input_num;
+  int n;
+  int c;
+  int h;
+  int w;
+  int op_code;
+  float *coeff;
+  int *input_local_cstride;
+  int if_relu;
+  DATA_TYPE_T dtype;
+} eltwise_float_local_param_t;
+
 typedef struct {
   uint64_t input_addr;
   uint64_t output_addr;
@@ -317,6 +407,75 @@ typedef struct {
   DATA_TYPE_T dtype;
 } prelu_param_t;
 
+typedef struct {
+  int sel0_is_const;
+  int sel1_is_const;
+  float sel0_const_val;
+  float sel1_const_val;
+} select_common_spec_t;
+
+typedef struct {
+  float scale_val;
+  int begin_axis;
+  int end_axis;
+  int log;
+  int zero_point;
+} softmax_common_param_t;
+
+typedef struct {
+  softmax_common_param_t common;
+} softmax_global_param_t;
+
+typedef struct {
+  softmax_common_param_t common;
+  uint32_t buffer_addr;
+} softmax_local_param_t;
+
+typedef struct {
+  softmax_common_param_t common;
+} softmax_tflite_fix8b_param_t;
+
+typedef struct {
+  unsigned long long input_addr;
+  unsigned long long weight_addr;
+  unsigned long long bias_addr;
+  unsigned long long output_addr;
+  unsigned long long mean_addr;
+  unsigned long long rstd_addr;
+  int shape[MAX_SHAPE_DIMS];
+  int dims;
+  int axis;
+  float eps;
+  int affine; // 0: no weight and bias, 1: weight, 2: bias, 3: both
+  int need_mean;
+  int need_rstd;
+  int dtype;
+} layer_norm_global_param_t;
+
+typedef struct {
+  unsigned int input_addr;
+  unsigned int weight_addr;
+  unsigned int bias_addr;
+  unsigned int output_addr;
+  unsigned int mean_addr;
+  unsigned int rstd_addr;
+  unsigned int buffer_addr;
+  int input_n;
+  int input_c;
+  int input_h;
+  int input_w;
+  int depth;
+  float eps;
+  int affine;
+  int need_mean;
+  int need_rstd;
+  int dtype;
+} layer_norm_local_param_t;
+
+typedef struct reshape_spec {
+    int32_t dims;
+    int32_t shape[MAX_SHAPE_DIMS];
+} reshape_spec_t ;
 #ifdef __cplusplus
 }
 #endif
@@ -369,17 +528,57 @@ typedef void (*cmd_id_merge)(void *p_cmd_dst, void *p_cmd_src0,
 typedef void (*sg_set_profile_dump)(bool enable);
 typedef void (*sg_stas_dump)(void *pid_node);
 typedef void (*sg_flops_dump)(long long flops, void *pid_node);
+typedef void (*sg_stas_reset)();
 
 namespace tpu_mlir {
 namespace backend {
-class BM168x {
+
+#define CAST_FUNCTION(name)                                                    \
+  dl_##name = CastToFPtr<name>(#name)
+#define CAST_FUNCTION_WITH_SYM(name, sym)                                      \
+  dl_##name = CastToFPtr<name>(#sym)
+
+class BM168x : public Arch {
 
 public:
-  virtual void init();
-  virtual void before_codegen();
-  virtual void after_codegen(int64_t flops = 0);
-  virtual void deinit();
-  static BM168x *instance(const llvm::StringRef chip);
+  static BM168x *instance() { return (BM168x *)inst; }
+  // -------------------------------------------------------------------
+  // helper functions for global
+  // -------------------------------------------------------------------
+  static void call_global_func(const char *symbolName, void *params,
+                               int param_size);
+  static void call_local_func(const char *symbolName, void *params,
+                              int param_size);
+  static void call_global_func(const char *symbolName, void *params,
+                               int param_size, void *input, void *output);
+  static void call_local_func(const char *symbolName, void *params,
+                              int param_size, void *info, void *input,
+                              void *output);
+  static DATA_TYPE_T getDataType(Type type);
+  static DATA_TYPE_T getDataType(Value v);
+  static int getGdmaFormat(DATA_TYPE_T data_type);
+  static int getFmtBytes(DATA_TYPE_T data_type);
+  static tensor_spec_t value_to_spec(Value v);
+  static std::shared_ptr<std::vector<tensor_spec_t>>
+  get_input_spec(Operation *op);
+  static std::shared_ptr<std::vector<tensor_spec_t>>
+  get_output_spec(Operation *op);
+  static std::shared_ptr<std::vector<tensor_spec_t>>
+  get_spec(ValueRange values);
+  static void fix_shape(tensor_spec_t &spec,
+                        const std::vector<int32_t> &new_shape);
+  static int compare_mode(StringRef mode);
+  static int64_t ic_num(double dbytes) { return IC_PARALLEL / dbytes; }
+  static stride_4D_t getGlobalStride(int64_t N, int64_t C, int64_t H,
+                                     int64_t W);
+  static stride_4D_t getLocalStride(int64_t N, int64_t C, int64_t H, int64_t W,
+                                    int fmtBytes, bool eu_align = true);
+  static int64_t ALIGNMENT;
+  static int64_t IC_PARALLEL;
+  static uint64_t GMEM_START_ADDR;
+  static uint64_t CTX_START_ADDR;
+  static const uint64_t CMODEL_GMEM_SIZE = 0x100000000ull;
+
   // -------------------------------------------------------------------
   // functions from nodechip
   // -------------------------------------------------------------------
@@ -408,55 +607,39 @@ public:
   sg_set_profile_dump dl_sg_set_profile_dump;
   sg_stas_dump dl_sg_stas_dump;
   sg_flops_dump dl_sg_flops_dump;
+  sg_stas_reset dl_sg_stas_reset;
+
+public:
+  // -------------------------------------------------------------------
+  // functions for codegen
+  // -------------------------------------------------------------------
+  virtual void before_codegen();
+  virtual void after_codegen(int64_t flops = 0);
 
   void *get_gmem_addr(uint64_t addr);
   void *get_gmem_addr(const bm_device_mem_t &mem);
   void bm_memcpy_s2d(const bm_device_mem_t &dst, void *src);
   void bm_memcpy_d2s(void *dst, const bm_device_mem_t &src);
-  void value_s2d(mlir::Value v, void *src);
-  void value_d2s(mlir::Value v, void *dst);
+  void value_s2d(Value v, void *src);
+  void value_d2s(Value v, void *dst);
   void divide_sync_id();
   void merge_sync_id();
 
   // arch info
-  virtual uint64_t get_gmem_start() = 0;
-  virtual uint64_t get_ctx_start_addr() = 0;
-  virtual int64_t get_npu_num() = 0;
-  virtual int64_t get_eu_bytes() = 0;
-  virtual int64_t get_lmem_bytes() = 0;
-  virtual int64_t get_lmem_banks() = 0;
-  virtual int64_t get_lmem_bank_bytes() {
-    return get_lmem_bytes() / get_lmem_banks();
-  }
   virtual uint32_t get_bdc_len(int bdc_num, int group_id) = 0;
   virtual uint32_t get_gdma_len(int gdma_num, int group_id) = 0;
-  uint64_t get_cmodel_gmem_size() { return 0x100000000ull; }
-  int64_t get_eu_num(int64_t dtype_bytes) {
-    return get_eu_bytes() / dtype_bytes;
-  }
-  virtual int64_t get_n_align(int64_t dtype_bytes) { return 1; }
-  int64_t get_lmem_bytes(int64_t n, int64_t c, int64_t h, int64_t w,
-                         mlir::Type type, bool eu_align = true,
-                         bool is_4N = false);
-  int64_t get_tensor_lmem_bytes(mlir::Value v, int64_t slice_n, int64_t slice_h,
-                                bool eu_align = true);
-  int64_t get_weight_lmem_bytes(mlir::Value v, bool eu_align = true);
-  static DATA_TYPE_T getDataType(mlir::Type type);
-  static DATA_TYPE_T getDataType(mlir::Value v);
-  static int getGdmaFormat(DATA_TYPE_T data_type);
-  static int getFmtBytes(DATA_TYPE_T data_type);
-  static tensor_spec_t value_to_spec(mlir::Value v);
-  static std::shared_ptr<std::vector<tensor_spec_t>>
-  get_input_spec(mlir::Operation *op);
-  static std::shared_ptr<std::vector<tensor_spec_t>>
-  get_output_spec(mlir::Operation *op);
-  static void fix_shape(tensor_spec_t &spec,
-                        const std::vector<int32_t> &new_shape);
 
-  static stride_4D_t getGlobalStride(int64_t N, int64_t C, int64_t H,
-                                     int64_t W);
-  stride_4D_t getLocalStride(int64_t N, int64_t C, int64_t H, int64_t W,
-                             int fmtBytes, bool eu_align = true);
+  void set_command_issue_flag(bool value);
+  void reset_cmd_id_node();
+  int64_t get_gdma_cycle();
+  int64_t get_bdc_cycle();
+  int64_t get_cmd_cycle();
+
+  void reset_command_flag() {
+    dl_use_atomic_cmodel();
+    dl_allow_atomic_cmodel_assert();
+    dl_forbid_store_cmd();
+  }
 
 public:
   std::vector<uint32_t> bdc_buffer;
@@ -472,18 +655,16 @@ public:
   void *bdc_node;
   void *gdma_node;
 
-  static const int64_t ALIGNMENT = 0x1000;
-
 protected:
-  virtual const char *get_lib_name() = 0;
+  BM168x(){};
+  virtual ~BM168x() = 0;
   virtual void load_functions();
-  void set_command_issue_flag(bool value);
-  template <typename FPtrTy> FPtrTy CastToFPtr(const char *symbolName);
+  virtual void start_env();
+  virtual void end_env();
 
 protected:
+  static BM168x *bm168x;
   bool really_issue_command;
-  llvm::StringRef chip;
-  llvm::sys::DynamicLibrary DL;
 };
 
 } // namespace backend

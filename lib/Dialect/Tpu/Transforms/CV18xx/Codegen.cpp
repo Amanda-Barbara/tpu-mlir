@@ -6,15 +6,11 @@
 // third-party components.
 //
 //===----------------------------------------------------------------------===//
-//
-// This file implements the TPU dialect OP Stats pass.
-//
-//===----------------------------------------------------------------------===//
 
 #include "tpu_mlir/Backend/CV18xx/CV18xx.h"
 #include "tpu_mlir/Dialect/Tpu/Transforms/CV18xx/MlirToCvimodel.hpp"
 #include "tpu_mlir/Dialect/Tpu/Transforms/Passes.h"
-#include "tpu_mlir/Support/Helper/Module.h"
+#include "tpu_mlir/Support/Module.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include <fstream>
@@ -22,9 +18,8 @@
 #include <sstream>
 
 using namespace llvm;
-using namespace mlir;
 using namespace tpu_mlir::backend;
-using namespace tpu_mlir::helper;
+
 using namespace flatbuffers;
 namespace tpu_mlir {
 namespace tpu {
@@ -34,21 +29,18 @@ public:
   CVCodegenPass() {}
   void runOnOperation() override {
     module = getOperation();
-    state = Module::getState(module);
-    chip = Module::getChip(module);
-    assert(state == Module::State::TPU_ADDRESSED);
-    assert(chip == Module::Chip::CV182x || chip == Module::Chip::CV183x);
+    assert(module::isState(module::State::TPU_ADDRESSED));
+    assert(module::isCV18xx());
     std::string filename = this->model_file;
     if (filename.empty()) {
       llvm_unreachable("output filename is empty");
     }
-    auto cv18xx = CV18xx::instance();
     CviModelBuilder builder(module);
     builder.storeModel(filename);
   }
+
 private:
   ModuleOp module;
-  StringRef state;
   StringRef chip;
 };
 

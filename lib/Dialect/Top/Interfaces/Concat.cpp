@@ -8,9 +8,9 @@
 //===----------------------------------------------------------------------===//
 
 #include "tpu_mlir/Dialect/Top/IR/TopOps.h"
+#include "tpu_mlir/Support/Module.h"
+#include "tpu_mlir/Support/MathUtils.h"
 
-using namespace tpu_mlir;
-using namespace mlir;
 
 int64_t top::ConcatOp::getFLOPs() { return 0; }
 
@@ -18,8 +18,8 @@ LogicalResult top::ConcatOp::init(InferenceParameter &p) { return success(); }
 void top::ConcatOp::deinit(InferenceParameter &p) {}
 
 LogicalResult top::ConcatOp::inference(InferenceParameter &p) {
-  auto axis_ = axis();
-  auto op0_shape = inputs()[0].getType().cast<RankedTensorType>().getShape();
+  auto axis_ = getAxis();
+  auto op0_shape = getInputs()[0].getType().cast<RankedTensorType>().getShape();
 
   int64_t high = 1;
   for (int64_t i = 0; i < axis_; ++i)
@@ -30,8 +30,8 @@ LogicalResult top::ConcatOp::inference(InferenceParameter &p) {
   //      ^                   | ---> [a*b, c*d + e*d] --> [a,b, c+e, d]
   // [a,b,e,d] -> [a*b, e*d] /                                  ^^^
   //      ^
-  SmallVector<int64_t> tailNum(inputs().size());
-  for (auto idt : llvm::enumerate(inputs())) {
+  SmallVector<int64_t> tailNum(getInputs().size());
+  for (auto idt : llvm::enumerate(getInputs())) {
     tailNum[idt.index()] =
         idt.value().getType().cast<RankedTensorType>().getNumElements() / high;
   }
@@ -42,6 +42,12 @@ LogicalResult top::ConcatOp::inference(InferenceParameter &p) {
              idt.value() * sizeof(float));
       out_p += idt.value();
     }
+  }
+
+  if (getDoRelu()) {
+    auto limit = getReluLimit().convertToDouble();
+    function_relu(p.outputs[0], p.outputs[0], module::getNumElements(getOutput()),
+                  limit);
   }
 
   return success();

@@ -15,29 +15,254 @@
 
 namespace tpu_mlir {
 namespace cv18xx {
+// TODO use passes
+static bool ConvertConv1d(PatternRewriter &rewriter, top::ConvOp op) {
+  auto kernel = module::getI64Array(op.getKernelShape());
+  if (kernel->size() != 1) {
+    return false;
+  }
+  std::vector<int64_t> vfilterShape, vAttr;
+  module::getShapeVec(op.getFilter(), vfilterShape);
+  vfilterShape.push_back(1);
+  auto new_type = RankedTensorType::get(vfilterShape, rewriter.getF32Type());
+  op.getFilter().setType(new_type);
+
+  // update kernel_shape
+  auto kernel_shape = module::getI64Array(op.getKernelShape());
+  vAttr = {kernel_shape->at(0), 1};
+  op->setAttr("kernel_shape", rewriter.getI64ArrayAttr(vAttr));
+  // update strides
+  vAttr.clear();
+  auto strides = module::getI64Array(op.getStrides());
+  vAttr = {strides->at(0), 1};
+  op->setAttr("strides", rewriter.getI64ArrayAttr(vAttr));
+  // update pads
+  vAttr.clear();
+  auto pads_v = module::getI64Array(op.getPads());
+  vAttr = {pads_v->at(0), 0, pads_v->at(1), 0};
+  op->setAttr("pads", rewriter.getI64ArrayAttr(vAttr));
+  // update dilations
+  vAttr.clear();
+  auto dilations = module::getI64Array(op.getDilations(), kernel_shape->size(), 1);
+  vAttr = {dilations->at(0), 1};
+  op->setAttr("dilations", rewriter.getI64ArrayAttr(vAttr));
+  auto convOp = rewriter.create<top::ConvOp>(op->getLoc(), op->getResultTypes(),
+                                             op->getOperands(), op->getAttrs());
+  rewriter.replaceOp(op, {convOp.getOutput()});
+  return true;
+}
+
+static bool ConvertDilation(PatternRewriter &rewriter, top::ConvOp op,
+                            const conv_attr_t &attr) {
+  const int DILATION_H_MAX = 15;
+  const int DILATION_W_MAX = 15;
+  if (attr.dh <= DILATION_H_MAX && attr.dw <= DILATION_W_MAX)
+    return false;
+  // filter
+  auto filterOp = cast<top::WeightOp>(op.getFilter().getDefiningOp());
+  auto filter_f32 = filterOp.read<float>();
+  std::vector<int64_t> filterShape;
+  module::getShapeVec(op.getFilter(), filterShape);
+  int64_t oc = 0;
+  int64_t ic = 0;
+  int64_t kh = 0;
+  int64_t kw = 0;
+  if (filterShape.size() == 4) {
+    oc = filterShape[0];
+    ic = filterShape[1];
+    kh = filterShape[2];
+    kw = filterShape[3];
+  } else if (filterShape.size() == 5) {
+    // g, oc/g, ic/g, kh, kw
+    oc = filterShape[0] * filterShape[1];
+    ic = filterShape[2];
+    kh = filterShape[3];
+    kw = filterShape[4];
+  } else {
+    llvm_unreachable("Not support now.");
+  }
+
+  int insertNumH = 0;
+  int insertNumW = 0;
+  int newDilationH = attr.dh;
+  int newDilationW = attr.dw;
+  while (1) {
+    insertNumH++;
+    newDilationH = (attr.dh - 1 - insertNumH) / (insertNumH + 1) + 1;
+    if (((attr.dh - 1 - insertNumH) % (insertNumH + 1) == 0) &&
+        newDilationH < DILATION_H_MAX)
+      break;
+  }
+
+  if (attr.dw > 1) {
+    while (1) {
+      insertNumW++;
+      newDilationW = (attr.dw - 1 - insertNumW) / (insertNumW + 1) + 1;
+      if (((attr.dw - 1 - insertNumW) % (insertNumW + 1) == 0) &&
+          newDilationW < DILATION_W_MAX)
+        break;
+    }
+  }
+
+  int k_ext_h = (insertNumH + 1) * (kh - 1) + 1;
+  int k_ext_w = (insertNumW + 1) * (kw - 1) + 1;
+  filterShape[2] = k_ext_h;
+  filterShape[3] = k_ext_w;
+  auto filterSize = oc * ic * k_ext_h * k_ext_w;
+  std::vector<float> newFilter(filterSize, 0);
+  for (int i = 0; i < oc * ic; i++) {
+    for (int j = 0; j < kh; j++) {
+      for (int k = 0; k < kw; k++) {
+        auto old_offset = i * kh * kw + j * kw + k;
+        auto new_offset = i * k_ext_h * k_ext_w +
+                          j * (insertNumH + 1) * k_ext_w + k * (insertNumW + 1);
+        newFilter[new_offset] = filter_f32->data()[old_offset];
+      }
+    }
+  }
+
+  // update filter op
+  auto new_type = RankedTensorType::get(filterShape, rewriter.getF32Type());
+  auto new_filter_op =
+      top::WeightOp::create(op, "dilation", newFilter, new_type);
+  op->setOperand(1, new_filter_op);
+  // update convOp attr
+  std::vector<int64_t> new_kernel_shape, new_dilations;
+  auto kernel_shape = module::getI64Array(op.getKernelShape());
+  auto dilations = module::getI64Array(op.getDilations(), kernel_shape->size(), 1);
+  new_kernel_shape.assign(kernel_shape->begin(), kernel_shape->end());
+  new_dilations.assign(dilations->begin(), dilations->end());
+  auto kernel_size = new_kernel_shape.size();
+  new_kernel_shape[kernel_size - 2] = k_ext_h;
+  new_kernel_shape[kernel_size - 1] = k_ext_w;
+
+  new_dilations[kernel_size - 2] = newDilationH;
+  new_dilations[kernel_size - 1] = newDilationW;
+
+  op->setAttr("kernel_shape", rewriter.getI64ArrayAttr(new_kernel_shape));
+  op->setAttr("dilations", rewriter.getI64ArrayAttr(new_dilations));
+  auto convOp = rewriter.create<top::ConvOp>(op->getLoc(), op->getResultTypes(),
+                                             op->getOperands(), op->getAttrs());
+  rewriter.replaceOp(op, {convOp.getOutput()});
+  return true;
+}
+
+static bool ConvertPading(PatternRewriter &rewriter, top::ConvOp op,
+                          const conv_attr_t &attr) {
+  // deal with pad > 16
+  bool insert_pad = false;
+  auto kernel_size = module::getI64Array(op.getKernelShape())->size();
+  std::vector<int64_t> input_shape;
+  module::getShapeVec(op.getInput(), input_shape);
+  auto _pads = module::getI64Array(op.getPads());
+  std::vector<int64_t> pad_v;
+  std::vector<int64_t> new_pad_v(2 * input_shape.size(), 0);
+  pad_v.assign(_pads->begin(), _pads->end());
+  for (auto p : pad_v) {
+    if (p > 15) {
+      insert_pad = true;
+      break;
+    }
+  }
+  if (insert_pad && kernel_size > 3) {
+    // todo pad 3d (padOp not support now)
+    llvm_unreachable("Not supported now");
+  }
+  if (insert_pad) {
+    if (kernel_size == 2) {
+      if (attr.pht > 15) {
+        assert(attr.pht == pad_v[0]);
+        pad_v[0] = 0;
+        new_pad_v[2] = attr.pht;
+        input_shape[2] += attr.pht;
+      }
+      if (attr.pwl > 15) {
+        assert(attr.pwl == pad_v[1]);
+        pad_v[1] = 0;
+        new_pad_v[3] = attr.pwl;
+        input_shape[3] += attr.pwl;
+      }
+      if (attr.phb > 15) {
+        assert(attr.phb == pad_v[2]);
+        pad_v[2] = 0;
+        new_pad_v[6] = attr.phb;
+        input_shape[2] += attr.phb;
+      }
+      if (attr.pwr > 15) {
+        assert(attr.pwr == pad_v[3]);
+        pad_v[3] = 0;
+        new_pad_v[7] = attr.pwr;
+        input_shape[3] += attr.pwr;
+      }
+    }
+    if (kernel_size == 1) {
+      if (attr.pht > 15) {
+        assert(attr.pht == pad_v[0]);
+        pad_v[0] = 0;
+        new_pad_v[2] = attr.pht;
+        input_shape[2] += attr.pht;
+      }
+      if (attr.phb > 15) {
+        assert(attr.phb == pad_v[1]);
+        pad_v[1] = 0;
+        new_pad_v[5] = attr.phb;
+        input_shape[2] += attr.phb;
+      }
+    }
+    std::vector<NamedAttribute> attrs;
+    attrs.push_back(rewriter.getNamedAttr(
+        "paddings", rewriter.getI64ArrayAttr(ArrayRef<int64_t>{new_pad_v})));
+    auto op_name = module::getName(op.getOperation()).str();
+    auto loc = NameLoc::get(rewriter.getStringAttr(op_name + "_pad"));
+    auto type = op.getInput().getType().cast<RankedTensorType>();
+    auto new_type = RankedTensorType::get(input_shape, type.getElementType());
+    auto padOp = rewriter.create<top::PadOp>(loc, new_type,
+                                             ValueRange{
+                                                 op.getInput(),
+                                             },
+                                             attrs);
+    op->setAttr("pads", rewriter.getI64ArrayAttr(pad_v));
+    op->setOperand(0, padOp);
+    auto convOp = rewriter.create<top::ConvOp>(
+        op->getLoc(), op->getResultTypes(), op->getOperands(), op->getAttrs());
+    rewriter.replaceOp(op, {convOp.getOutput()});
+  }
+  return insert_pad;
+}
+
 void ConvLowering::LoweringINT8(PatternRewriter &rewriter, top::ConvOp op,
                                 bool asymmetric) const {
+  // for convert from hsigmoid/hswish
+  if (!module::isCalibratedType(op.getOutput()) &&
+      !module::isUniformQuantized(op.getOutput())) {
+    LoweringBF16(rewriter, op);
+    return;
+  }
   rewriter.setInsertionPointAfter(op);
   std::vector<Value> operands;
-  operands.push_back(op.input());
-  conv_attr_t attr = {0};
-  op.parseParam(&attr);
-  if (attr.pht > 15 || attr.phb > 15 || attr.pwl > 15 || attr.pwr > 15) {
-    llvm_unreachable("Fix me. Not supported now");
+  operands.push_back(op.getInput());
+  auto attr = op.parseParam();
+  if (ConvertConv1d(rewriter, op)) {
+    return;
+  }
+  if (ConvertPading(rewriter, op, attr)) {
+    return;
+  }
+  if (ConvertDilation(rewriter, op, attr)) {
+    return;
   }
   double in_thr, out_thr;
-  in_thr = Quant::getThreshold(op.input());
-  out_thr = Quant::getThreshold(op.output());
+  in_thr = module::getThreshold(op.getInput());
+  out_thr = module::getThreshold(op.getOutput());
   // filter
-  float fqmax = 127;
-  auto filterOp = cast<top::WeightOp>(op.filter().getDefiningOp());
+  auto filterOp = cast<top::WeightOp>(op.getFilter().getDefiningOp());
   auto filter_f32 = filterOp.read<float>();
 
-  std::shared_ptr<std::vector<int32_t>> bias_int32;
+  i32_array_t bias_int32;
   std::shared_ptr<std::vector<float>> bias_fp32;
   auto filter_i8 = std::make_shared<std::vector<int8_t>>(filter_f32->size());
   if (attr.has_bias) {
-    auto biasOp = cast<top::WeightOp>(op.bias().getDefiningOp());
+    auto biasOp = cast<top::WeightOp>(op.getBias().getDefiningOp());
     bias_fp32 = biasOp.read<float>();
     bias_int32 = std::make_shared<std::vector<int32_t>>(bias_fp32->size());
   }
@@ -78,7 +303,7 @@ void ConvLowering::LoweringINT8(PatternRewriter &rewriter, top::ConvOp op,
         }
       }
     }
-    // decompose qscale into rshift and muliplier
+    // decompose qscale into rshift and multiplier
     // QuantizeMultiplier(qscale, &multiplier, &rshift, false);
     getRShiftAndMultiplierFromQScale(qscale, &multiplier, &rshift, true);
     multiplier_v.push_back(multiplier);
@@ -93,7 +318,7 @@ void ConvLowering::LoweringINT8(PatternRewriter &rewriter, top::ConvOp op,
                                       rshift, multiplier, true);
     }
   }
-  auto filter_type = op.filter().getType().cast<RankedTensorType>();
+  auto filter_type = op.getFilter().getType().cast<RankedTensorType>();
   auto new_type = RankedTensorType::get(filter_type.getShape(),
                                         rewriter.getIntegerType(8, true));
   auto new_filter =
@@ -107,7 +332,7 @@ void ConvLowering::LoweringINT8(PatternRewriter &rewriter, top::ConvOp op,
         top::WeightOp::create(op, "bias_int32", *bias_int32, new_type);
     operands.push_back(new_bias);
   } else {
-    operands.push_back(op.bias()); // none
+    operands.push_back(op.getBias()); // none
   }
   std::vector<NamedAttribute> attrs;
   for (auto &attr : op->getAttrs()) {
@@ -122,54 +347,54 @@ void ConvLowering::LoweringINT8(PatternRewriter &rewriter, top::ConvOp op,
       "multiplier", rewriter.getI64ArrayAttr(ArrayRef<int64_t>{multiplier_v})));
   attrs.push_back(
       rewriter.getNamedAttr("with_bias", rewriter.getBoolAttr(attr.has_bias)));
-  auto newType = Quant::getQuantInt8Type(op.output(), asymmetric);
+  auto newType = getQuantInt8Type(op.getOutput(), asymmetric);
   auto newOp = rewriter.create<tpu::Conv2DOp>(op->getLoc(), newType,
                                               ArrayRef<Value>{operands},
                                               ArrayRef<NamedAttribute>{attrs});
-  Value newValue = newOp.output();
+  Value newValue = newOp.getOutput();
   rewriter.replaceOp(op, {newValue});
 }
 
 void ConvLowering::LoweringBF16(PatternRewriter &rewriter,
                                 top::ConvOp op) const {
-  auto ctx = getContext();
   rewriter.setInsertionPointAfter(op);
   std::vector<Value> operands;
-  const int nInputs = op->getNumOperands();
-  auto filterOp = cast<top::WeightOp>(op.filter().getDefiningOp());
-  operands.push_back(op.input());
-  operands.push_back(filterOp.clone_bf16(op));
-  operands.push_back(op.bias());
-
-  conv_attr_t attr = {0};
-  op.parseParam(&attr);
-  if (attr.pht > 15 || attr.phb > 15 || attr.pwl > 15 || attr.pwr > 15) {
-    llvm_unreachable("Fix me. Not supported now");
+  auto attr = op.parseParam();
+  if (ConvertConv1d(rewriter, op)) {
+    return;
   }
+  if (ConvertPading(rewriter, op, attr)) {
+    return;
+  }
+  if (ConvertDilation(rewriter, op, attr)) {
+    return;
+  }
+  auto filterOp = cast<top::WeightOp>(op.getFilter().getDefiningOp());
+  operands.push_back(op.getInput());
+  operands.push_back(filterOp.clone_bf16(op));
+  operands.push_back(op.getBias());
 
   std::vector<NamedAttribute> attrs;
   for (auto &attr : op->getAttrs()) {
     attrs.push_back(attr);
   }
-  bool with_bias = !op.bias().getType().isa<mlir::NoneType>();
+  bool with_bias = !op.getBias().getType().isa<mlir::NoneType>();
   attrs.push_back(
       rewriter.getNamedAttr("with_bias", rewriter.getBoolAttr(with_bias)));
-  auto tensor_type = op.output().getType().cast<RankedTensorType>();
-  auto newType =
-      RankedTensorType::get(tensor_type.getShape(), rewriter.getBF16Type());
+  auto newType = getQuantBF16Type(op.getOutput());
   Value newValue;
-  if (op.kernel_shape().size() == 1) {
+  if (op.getKernelShape().size() == 1) {
     auto newOp =
         rewriter.create<tpu::Conv1DOp>(op->getLoc(), newType, operands, attrs);
-    newValue = newOp.output();
-  } else if (op.kernel_shape().size() == 2) {
+    newValue = newOp.getOutput();
+  } else if (op.getKernelShape().size() == 2) {
     auto newOp =
         rewriter.create<tpu::Conv2DOp>(op->getLoc(), newType, operands, attrs);
-    newValue = newOp.output();
+    newValue = newOp.getOutput();
   } else {
     auto newOp =
         rewriter.create<tpu::Conv3DOp>(op->getLoc(), newType, operands, attrs);
-    newValue = newOp.output();
+    newValue = newOp.getOutput();
   }
   rewriter.replaceOp(op, {newValue});
 }

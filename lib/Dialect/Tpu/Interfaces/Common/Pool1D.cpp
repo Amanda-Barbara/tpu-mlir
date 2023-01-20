@@ -10,55 +10,52 @@
 #include "tpu_mlir/Dialect/Tpu/IR/TpuOps.h"
 #include "tpu_mlir/Support/Dnnl/Dnnl.h"
 #include "tpu_mlir/Support/Float16.h"
-#include "tpu_mlir/Support/Helper/Module.h"
-#include "tpu_mlir/Support/Helper/Quant.h"
+#include "tpu_mlir/Support/Module.h"
+
 #include "tpu_mlir/Support/MathUtils.h"
 
-using namespace tpu_mlir;
-using namespace tpu_mlir::helper;
-using namespace mlir;
 
-void tpu::Pool1DOp::parseParam(void *param) {
-  pool_attr_t *p = (pool_attr_t *)param;
-  memset(p, 0, sizeof(pool_attr_t));
-  p->id = 1;
-  p->od = 1;
-  p->kd = 1;
-  p->kw = 1;
-  p->sd = 1;
-  p->sw = 1;
-  auto ishape = input().getType().dyn_cast<RankedTensorType>().getShape();
-  auto oshape = output().getType().dyn_cast<RankedTensorType>().getShape();
-  Module::getNCHW(ishape, p->n, p->c, p->ih, p->iw);
-  Module::getNCHW(oshape, p->n, p->c, p->oh, p->ow);
-  assert(p->iw == 1 && p->ow == 1);
 
-  auto kernel = Module::getI64Array(kernel_shape());
-  p->kh = kernel->at(0);
-  auto stride = Module::getI64Array(strides());
-  p->sh = stride->at(0);
-  auto pad = Module::getI64Array(pads());
-  p->pad_h = pad->at(0);
-  p->pad_h_after = pad->at(1);
-  p->pad_value = pad_value();
-  p->do_relu = do_relu();
-  p->relu_limit = relu_limit().convertToDouble();
-  p->is_global = p->ih == p->kh && p->iw == p->kw && p->oh == 1 && p->ow == 1;
-  p->count_include_pad = count_include_pad();
+pool_attr_t tpu::Pool1DOp::parseParam() {
+  pool_attr_t p = {0};
+  p.id = 1;
+  p.od = 1;
+  p.kd = 1;
+  p.kw = 1;
+  p.sd = 1;
+  p.sw = 1;
+  auto ishape = getInput().getType().dyn_cast<RankedTensorType>().getShape();
+  auto oshape = getOutput().getType().dyn_cast<RankedTensorType>().getShape();
+  module::getNCHW(ishape, p.n, p.c, p.ih, p.iw);
+  module::getNCHW(oshape, p.n, p.c, p.oh, p.ow);
+  assert(p.iw == 1 && p.ow == 1);
+
+  auto kernel = module::getI64Array(getKernelShape());
+  p.kh = kernel->at(0);
+  auto stride = module::getI64Array(getStrides());
+  p.sh = stride->at(0);
+  auto pad = module::getI64Array(getPads());
+  p.pad_h = pad->at(0);
+  p.pad_h_after = pad->at(1);
+  p.pad_value = getPadValue();
+  p.do_relu = getDoRelu();
+  p.relu_limit = getReluLimit().convertToDouble();
+  p.is_global = p.ih == p.kh && p.iw == p.kw && p.oh == 1 && p.ow == 1;
+  p.count_include_pad = getCountIncludePad();
+  return p;
 }
 
 LogicalResult tpu::Pool1DOp::init(InferenceParameter &p) {
   auto pooling = new Pooling();
-  pool_attr_t attrs;
-  parseParam(&attrs);
+  auto attr = parseParam();
 
   int izp = 0;
-  auto dtype = input().getType().cast<RankedTensorType>().getElementType();
-  if (dtype.isa<quant::UniformQuantizedType>()) {
+  auto dtype = getInput().getType().cast<RankedTensorType>().getElementType();
+  bool is_avg_pooling = getPoolMode() == tpu::PoolMode::Avg;
+  if (dtype.isa<quant::UniformQuantizedType>() && is_avg_pooling) {
     izp = dtype.cast<quant::UniformQuantizedType>().getZeroPoint();
   }
-  bool is_avg_pooling = pool_mode() == tpu::PoolMode::Avg;
-  pooling->setup(p.inputs[0], p.outputs[0], attrs, is_avg_pooling, izp);
+  pooling->setup(p.inputs[0], p.outputs[0], attr, is_avg_pooling, izp);
   p.handle = (void *)pooling;
   return success();
 }
@@ -79,54 +76,53 @@ LogicalResult tpu::Pool1DOp::inference(InferenceParameter &p) {
   auto pooling = (Pooling *)p.handle;
   pooling->run();
 
-  if (pool_mode() == tpu::PoolMode::Max) {
-    if (do_relu()) {
-      auto limit = relu_limit().convertToDouble();
+  if (getPoolMode() == tpu::PoolMode::Max) {
+    if (getDoRelu()) {
+      auto limit = getReluLimit().convertToDouble();
       function_relu(p.outputs[0], p.outputs[0],
-                    Module::getNumElements(output()), limit,
-                    Module::getStorageType(output()));
+                    module::getNumElements(getOutput()), limit,
+                    module::getStorageType(getOutput()));
     }
     return success();
   }
   // average pooling
-  auto out_type = Module::getStorageType(output());
-  auto num_elem = Module::getNumElements(output());
+  auto out_type = module::getStorageType(getOutput());
+  auto num_elem = module::getNumElements(getOutput());
   if (out_type.isInteger(8)) {
-    auto i_qtype = Quant::getUniformQuantizedType(input());
-    auto o_qtype = Quant::getUniformQuantizedType(output());
-    auto module = Module::getModuleOp(getOperation());
+    auto i_qtype = module::getUniformQuantizedType(getInput());
+    auto o_qtype = module::getUniformQuantizedType(getOutput());
 
-    if (Module::getAsymmetric(module) == false) {
-      auto multi = multiplier().value();
-      auto rs = rshift().value();
+    if (module::isAsymmetric() == false) {
+      auto multi = getMultiplier().value();
+      auto rs = getRshift().value();
 #pragma omp parallel for schedule(static, omp_schedule(num_elem))
       for (int64_t i = 0; i < num_elem; ++i) {
         p.outputs[0][i] = applyMultiplierAndRShift(
             std::round(p.outputs[0][i] * pooling->kh), multi, rs);
         p.outputs[0][i] = out_type.isUnsignedInteger(8)
-                              ? Quant::to_uint8(p.outputs[0][i])
-                              : Quant::to_int8(p.outputs[0][i]);
+                              ? to_uint8(p.outputs[0][i])
+                              : to_int8(p.outputs[0][i]);
       }
     } else {
 #pragma omp parallel for schedule(static, omp_schedule(num_elem))
       for (int64_t i = 0; i < num_elem; ++i) {
-        p.outputs[0][i] = p.outputs[0][i] * pooling->kh *
-                              scale().value().convertToDouble() +
-                          offset().value().convertToDouble();
+        p.outputs[0][i] =
+            p.outputs[0][i] * pooling->kh * getScale().value().convertToDouble() +
+            getOffset().value().convertToDouble();
         p.outputs[0][i] = out_type.isUnsignedInteger(8)
-                              ? Quant::to_uint8(p.outputs[0][i])
-                              : Quant::to_int8(p.outputs[0][i]);
+                              ? to_uint8(p.outputs[0][i])
+                              : to_int8(p.outputs[0][i]);
       }
     }
   } else if (out_type.isa<FloatType>()) {
-    if (do_relu()) {
-      auto limit = relu_limit().convertToDouble();
+    if (getDoRelu()) {
+      auto limit = getReluLimit().convertToDouble();
       function_relu(p.outputs[0], p.outputs[0], num_elem, limit);
     }
     if (out_type.isBF16()) {
-      f32_to_bf16(p.outputs[0], p.outputs[0], num_elem);
+      BF16(p.outputs[0], p.outputs[0], num_elem);
     } else if (out_type.isF16()) {
-      f32_to_f16(p.outputs[0], p.outputs[0], num_elem);
+      F16(p.outputs[0], p.outputs[0], num_elem);
     }
   }
 
@@ -134,7 +130,7 @@ LogicalResult tpu::Pool1DOp::inference(InferenceParameter &p) {
 }
 
 LogicalResult tpu::Pool1DOp::LocalGenSupport() {
-  auto stride = Module::getI64Array(strides());
+  auto stride = module::getI64Array(getStrides());
   if (stride->at(0) > 15) {
     return failure();
   }
@@ -142,11 +138,45 @@ LogicalResult tpu::Pool1DOp::LocalGenSupport() {
 }
 
 LogicalResult tpu::Pool1DOp::BackwardH(int64_t &in_idx, int64_t &in_slice,
-                                          int64_t out_idx, int64_t out_slice) {
-  pool_attr_t attrs;
-  parseParam(&attrs);
-  in_slice = (out_slice - 1) * attrs.sh + attrs.kh;
-  in_idx = out_idx * attrs.sh - attrs.pad_h;
-  LocalGenInterface::fixSlice(in_idx, in_slice, attrs.ih);
+                                       int64_t out_idx, int64_t out_slice) {
+  auto attr = parseParam();
+  in_slice = (out_slice - 1) * attr.sh + attr.kh;
+  in_idx = out_idx * attr.sh - attr.pad_h;
+  bool is_last = (out_idx + out_slice == attr.oh);
+  LocalGenInterface::fixSlice(in_idx, in_slice, attr.ih, is_last);
+  return success();
+}
+
+LogicalResult tpu::Pool1DOp::DynBackwardH(int64_t &in_idx, int64_t &in_slice,
+                                       int64_t out_idx, int64_t out_slice) {
+  auto attr = parseParam();
+  in_slice = (out_slice - 1) * attr.sh + attr.kh;
+  in_idx = out_idx * attr.sh - attr.pad_h;
+  return success();
+}
+
+
+LogicalResult tpu::Pool1DOp::DynBackwardKh(int64_t &in_kh, int64_t out_kh) {
+  auto attr = parseParam();
+  in_kh = (out_kh - 1) * attr.sh + attr.kh;
+  return success();
+}
+
+
+LogicalResult tpu::Pool1DOp::DynBackwardStrideH(int64_t &in_stride_h, int64_t out_stride_h) {
+  auto attr = parseParam();
+  in_stride_h = out_stride_h * attr.sh;
+  return success();
+}
+
+LogicalResult tpu::Pool1DOp::DynBackwardUpPadH(int64_t &in_up_pad_h, int64_t out_up_pad_h) {
+  auto attr = parseParam();
+  in_up_pad_h = out_up_pad_h * attr.sh + attr.pad_h;
+  return success();
+}
+
+LogicalResult tpu::Pool1DOp::DynBackwardDownPadH(int64_t &in_down_pad_h, int64_t out_down_pad_h) {
+  auto attr = parseParam();
+  in_down_pad_h = out_down_pad_h * attr.sh + attr.pad_h_after;
   return success();
 }

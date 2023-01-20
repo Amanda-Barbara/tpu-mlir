@@ -13,12 +13,10 @@
 #include "tpu_mlir/Dialect/Tpu/IR/TpuOps.h"
 #include "tpu_mlir/Support/Dnnl/Dnnl.h"
 #include "tpu_mlir/Support/Float16.h"
-#include "tpu_mlir/Support/Helper/Module.h"
-#include "tpu_mlir/Support/Helper/Quant.h"
+#include "tpu_mlir/Support/Module.h"
 #include "tpu_mlir/Support/LutFunc.h"
 #include "tpu_mlir/Support/MathUtils.h"
 
-#include "mlir/Dialect/Quant/QuantTypes.h"
 #include "mlir/IR/Location.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
@@ -26,17 +24,11 @@
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 using namespace llvm;
-using namespace mlir;
-using namespace tpu_mlir;
-using namespace tpu_mlir::helper;
 
 namespace tpu_mlir {
 
 struct LoweringConfig {
-  static MLIRContext *context;
-  static std::string chip;
-  static std::string mode;
-  static bool isAsymmetric;
+  static bool isQuantized;
   static std::map<std::string, llvm::StringRef> quantize_map;
 };
 
@@ -47,25 +39,32 @@ public:
   LogicalResult matchAndRewrite(OpTy opTy,
                                 PatternRewriter &rewriter) const override {
     Operation *op = opTy.getOperation();
-    if (Quant::isUniformQuantized(op->getResult(0))) {
+    bool isQuantized = LoweringConfig::isQuantized;
+    if (isQuantized) {
       LoweringQuantized(rewriter, opTy);
       return success();
     }
-    auto real_mode = LoweringConfig::mode;
-    auto op_name = Module::getName(op);
+    auto real_mode = module::getMode();
+    auto op_name = module::getName(op);
     auto iter = LoweringConfig::quantize_map.find(op_name.str());
     if (iter != LoweringConfig::quantize_map.end()) {
       real_mode = iter->second;
     }
-    bool isAsymmetric = LoweringConfig::isAsymmetric;
-    if (real_mode == Quant::Type::INT8) {
-      if (op->hasTrait<trait::SupportFuseRelu>() || isa<top::ReluOp>(op)) {
-        op->setAttr("relu_limit", rewriter.getF64FloatAttr(-1.0));
+    if (real_mode == module::Mode::INT8) {
+      LoweringINT8(rewriter, opTy, module::isAsymmetric());
+    } else if (real_mode == module::Mode::INT4) {
+      if (isa<top::ConvOp, top::MatMulOp>(op)) {
+        LoweringINT4(rewriter, opTy, module::isAsymmetric());
+      } else {
+        LoweringINT8(rewriter, opTy, module::isAsymmetric());
       }
-      LoweringINT8(rewriter, opTy, isAsymmetric);
-    } else if (real_mode == Quant::Type::F16) {
-      LoweringF16(rewriter, opTy);
-    } else if (real_mode == Quant::Type::BF16) {
+    } else if (real_mode == module::Mode::F16) {
+      if (module::isCV18xx()) {
+        LoweringBF16(rewriter, opTy);
+      } else {
+        LoweringF16(rewriter, opTy);
+      }
+    } else if (real_mode == module::Mode::BF16) {
       LoweringBF16(rewriter, opTy);
     } else {
       LoweringF32(rewriter, opTy);
@@ -77,6 +76,10 @@ public:
   virtual void LoweringINT8(PatternRewriter &rewriter, OpTy opTy,
                             bool asymmetric) const {
     llvm_unreachable("Not Implemented");
+  }
+  virtual void LoweringINT4(PatternRewriter &rewriter, OpTy opTy,
+                            bool asymmetric) const {
+    LoweringINT8(rewriter, opTy, asymmetric);
   }
   virtual void LoweringBF16(PatternRewriter &rewriter, OpTy opTy) const {
     llvm_unreachable("Not Implemented");
@@ -96,35 +99,76 @@ public:
 // Lowering Helper Apis
 // ================================
 
+mlir::Type getQuantInt8Type(Value v, bool asymmetric = false);
+mlir::Type getQuantIntType(Value v, double scale, double offset, int bits = 8);
+mlir::Type getQuantInt4Type(Value v, bool asymmetric = false);
+mlir::Type getQuantBoolType(Value v);
+
 // Lowering to a new Operation, with the same operands and same attrs, and
 // newType
 template <typename OpTy>
 static void lowering_common(PatternRewriter &rewriter, Operation *from,
-                            Type newType) {
-  // rewriter.setInsertionPointAfter(from);
-  rewriter.replaceOpWithNewOp<OpTy>(from, newType, from->getOperands(),
-                                    from->getAttrs());
+                            Type newType, int num_operands = 0) {
+  auto stype = module::getStorageType(newType);
+  if (stype.isF16() || stype.isBF16()) {
+    std::vector<Value> operands;
+    for (auto in : from->getOperands()) {
+      if (isa<top::WeightOp>(in.getDefiningOp())) {
+        auto wOp = in.getDefiningOp<top::WeightOp>();
+        if (stype.isF16()) {
+          operands.push_back(wOp.clone_f16(from));
+        } else {
+          operands.push_back(wOp.clone_bf16(from));
+        }
+      } else {
+        operands.push_back(in);
+      }
+    }
+    if (num_operands > from->getNumOperands()) {
+      auto noneOp = module::getNoneOp(from);
+      for (int i = from->getNumOperands(); i < num_operands; i++) {
+        operands.push_back(noneOp);
+      }
+    }
+    rewriter.replaceOpWithNewOp<OpTy>(from, newType, operands,
+                                      from->getAttrs());
+  } else if (num_operands > from->getNumOperands()) {
+    std::vector<Value> operands(from->operand_begin(), from->operand_end());
+    auto noneOp = module::getNoneOp(from);
+    for (int i = from->getNumOperands(); i < num_operands; i++) {
+      operands.push_back(noneOp);
+    }
+    rewriter.replaceOpWithNewOp<OpTy>(from, newType, operands,
+                                      from->getAttrs());
+  } else {
+    rewriter.replaceOpWithNewOp<OpTy>(from, newType, from->getOperands(),
+                                      from->getAttrs());
+  }
 }
 
 // lowering to a new Operation, with same operands and same attrs, and quantize
 // f32 output to int8 output
 template <typename OpTy>
 static void lowering_common_int8(PatternRewriter &rewriter, Operation *from,
-                                 bool asymmetric = false) {
+                                 bool asymmetric = false,
+                                 int num_operands = 0) {
   assert(from->getNumResults() == 1);
-  auto newType = Quant::getQuantInt8Type(from->getResult(0), asymmetric);
-  lowering_common<OpTy>(rewriter, from, newType);
+  auto newType = getQuantInt8Type(from->getResult(0), asymmetric);
+  lowering_common<OpTy>(rewriter, from, newType, num_operands);
 }
 
 template <typename ElemTy = Float32Type>
 static mlir::Type getQuantFloatType(Value v) {
-  auto sType = Module::getStorageType(v);
   Type newType = v.getType();
+  if (newType.isa<mlir::NoneType>()) {
+    return newType;
+  }
+  auto sType = module::getStorageType(v);
   if (sType.isa<ElemTy>() == false) {
-    auto shape = Module::getShape(v);
+    auto shape = module::getShape(v);
     auto ctx = v.getContext();
-    if (Quant::isCalibratedType(v)) {
-      auto caliType = Quant::getCalibratedType(v);
+    if (module::isCalibratedType(v)) {
+      auto caliType = module::getCalibratedType(v);
       auto newCaliType = quant::CalibratedQuantizedType::get(
           ElemTy::get(ctx), caliType.getMin(), caliType.getMax());
       newType = RankedTensorType::get(shape, newCaliType);
@@ -145,25 +189,29 @@ static mlir::Type getQuantF16Type(Value v) {
 
 // lowering to f32/f16/bf16
 template <typename OpTy, typename ElemTy>
-static void lowering_common_float(PatternRewriter &rewriter, Operation *from) {
+static void lowering_common_float(PatternRewriter &rewriter, Operation *from,
+                                  int num_operands = 0) {
   assert(from->getNumResults() == 1);
   auto newType = getQuantFloatType<ElemTy>(from->getResult(0));
-  lowering_common<OpTy>(rewriter, from, newType);
+  lowering_common<OpTy>(rewriter, from, newType, num_operands);
 }
 
 template <typename OpTy>
-static void lowering_common_f32(PatternRewriter &rewriter, Operation *from) {
-  lowering_common_float<OpTy, Float32Type>(rewriter, from);
+static void lowering_common_f32(PatternRewriter &rewriter, Operation *from,
+                                int num_operands = 0) {
+  lowering_common_float<OpTy, Float32Type>(rewriter, from, num_operands);
 }
 
 template <typename OpTy>
-static void lowering_common_bf16(PatternRewriter &rewriter, Operation *from) {
-  lowering_common_float<OpTy, BFloat16Type>(rewriter, from);
+static void lowering_common_bf16(PatternRewriter &rewriter, Operation *from,
+                                 int num_operands = 0) {
+  lowering_common_float<OpTy, BFloat16Type>(rewriter, from, num_operands);
 }
 
 template <typename OpTy>
-static void lowering_common_f16(PatternRewriter &rewriter, Operation *from) {
-  lowering_common_float<OpTy, Float16Type>(rewriter, from);
+static void lowering_common_f16(PatternRewriter &rewriter, Operation *from,
+                                int num_operands = 0) {
+  lowering_common_float<OpTy, Float16Type>(rewriter, from, num_operands);
 }
 
 // from int8 to int8, convert one (scale zp) to another (scale zp)
@@ -171,8 +219,9 @@ Value do_transfer(Value in, Value out, bool asymmetric);
 Value do_transfer_fp(Value in, Value out, bool asymmetric);
 
 // from int8 to int32
-Value do_dequant(Value input, Type to_type, int64_t multiplier, int64_t rshift,
-                 tpu::DequantMode mode, int64_t lshift);
+Value do_dequant(Location name_loc, Value input, Type to_type,
+                 int64_t multiplier, int64_t rshift, tpu::DequantMode mode,
+                 int64_t lshift);
 
 // from int8 to int32
 Value do_requant(Location name_loc, Value input, Type to_type, bool tensorType,
@@ -181,4 +230,35 @@ Value do_requant(Location name_loc, Value input, Type to_type, bool tensorType,
 Value do_requant(Location name_loc, Value input, Value quant, Type to_type,
                  bool tensorType, tpu::RequantMode mode);
 
+Value do_requantFp(Value input, double scale, double offset, Type to_type,
+                   std::string &to_name);
+
+template <typename OpTy>
+Value do_binary_saclar(Value input, Type to_type, int64_t scalar,
+                       const char *suffix = "_binary") {
+  auto from_stype = module::getStorageType(input);
+  auto to_stype = module::getStorageType(to_type);
+  auto ctx = input.getContext();
+  OpBuilder builder(ctx);
+  auto newType = to_type;
+  newType = RankedTensorType::get(module::getShape(input), to_stype);
+
+  builder.setInsertionPointAfterValue(input);
+  std::vector<NamedAttribute> attrs;
+  attrs.push_back(
+      builder.getNamedAttr("const_val", builder.getF64FloatAttr(scalar)));
+
+  std::string new_name = module::getName(input.getDefiningOp()).str() + suffix;
+  auto name_loc = NameLoc::get(builder.getStringAttr(new_name));
+  auto newOp =
+      builder.create<OpTy>(name_loc, newType, ValueRange{input}, attrs);
+  return newOp.getOutput();
+}
+
+Value do_reshape(Value input, RankedTensorType to_type);
+Value do_transpose(Location name_loc, Value input, std::vector<int64_t> &order);
+Value do_weight_dequant(Value input, Type to_type, int64_t multiplier,
+                        int64_t shift, int64_t lshift);
+int32_t do_const_dequant(Value input, int64_t multiplier, int64_t shift,
+                         int64_t lshift);
 } // namespace tpu_mlir

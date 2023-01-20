@@ -239,7 +239,7 @@ void parse_zip_footer(FILE* fp, uint16_t& nrecs, size_t& global_header_size,
       //get global header offset from extra data
       std::vector<char> zip64endrec_header(56);
       fseek(fp,-98,SEEK_END);
-      size_t res = fread(&zip64endrec_header[0],sizeof(char),56,fp);
+      fread(&zip64endrec_header[0],sizeof(char),56,fp);
       global_header_offset = *(uint64_t*) &zip64endrec_header[48];
     }
 }
@@ -551,6 +551,8 @@ template void npz_add_array<uint16_t>(npz_t &, std::string,
         const uint16_t*, const std::vector<size_t>);
 template void npz_add_array<uint32_t>(npz_t &, std::string,
         const uint32_t*, const std::vector<size_t>);
+template void npz_add_array<int32_t>(npz_t &, std::string,
+        const int32_t*, const std::vector<size_t>);
 
 template<typename T>
 void npz_add_array(npz_t &map, std::string fname,

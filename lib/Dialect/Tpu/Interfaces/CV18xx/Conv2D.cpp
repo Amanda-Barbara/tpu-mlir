@@ -10,16 +10,17 @@
 #include "tpu_mlir/Backend/CV18xx/CV18xx.h"
 #include "tpu_mlir/Backend/CV18xx/CV18xx_global_api.h"
 #include "tpu_mlir/Dialect/Tpu/IR/TpuOps.h"
+#include "tpu_mlir/Dialect/Tpu/Transforms/CV18xx/WeightReorder.h"
 #include "tpu_mlir/Support/Dnnl/Conv.h"
-#include "tpu_mlir/Support/Helper/Module.h"
-#include "tpu_mlir/Support/Helper/Quant.h"
+#include "tpu_mlir/Support/Module.h"
+
 #include "tpu_mlir/Support/MathUtils.h"
 #include "tpu_mlir/Support/TPUCompressUtil.h"
 
-using namespace mlir;
-using namespace tpu_mlir;
+
 using namespace tpu_mlir::backend;
-using namespace tpu_mlir::helper;
+
+using namespace tpu_mlir::cv18xx;
 
 // ======================================
 // WeightReorderInterface
@@ -93,10 +94,8 @@ static void refactorOddIcConv(std::shared_ptr<std::vector<int8_t>> &w,
 
 // for int8 bias
 static std::unique_ptr<std::vector<uint8_t>>
-packWeight(std::shared_ptr<std::vector<int32_t>> &bias,
-           std::shared_ptr<std::vector<int64_t>> &rshift,
-           std::shared_ptr<std::vector<int64_t>> &multiplier, int64_t oc,
-           std::vector<int64_t> &shape) {
+packWeight(i32_array_t &bias, i64_array_t &rshift, i64_array_t &multiplier,
+           int64_t oc, std::vector<int64_t> &shape) {
   if (bias) {
     assert(bias->size() == (size_t)oc);
   }
@@ -168,34 +167,36 @@ transposeBiasFp32(const std::shared_ptr<std::vector<float>> &bias_f32,
   memcpy(bias_u32.data(), bias_reshape_fp32.data(), size * sizeof(uint32_t));
 }
 
-void tpu::Conv2DOp::weight_reorder_int8_cv18xx() {
-  conv_attr_t attr = {0};
-  parseParam(&attr);
-  OpBuilder builder(getContext());
-  auto op = getOperation();
+template <>
+LogicalResult WeightReorder<tpu::Conv2DOp, int8_t>::matchAndRewrite(
+    tpu::Conv2DOp op, PatternRewriter &rewriter) const {
+  if (!module::getStorageType(op.getFilter()).isInteger(8))
+    return failure();
+
+  auto attr = op.parseParam();
   // first, merge conv rshift/multiplier/bias into one packed tensor
-  std::shared_ptr<std::vector<int32_t>> bias_new;
+  i32_array_t bias_new;
   std::vector<int64_t> bias_shape = {1, attr.oc, 1, 1};
   if (attr.has_bias) {
-    auto biasOp = bias().getDefiningOp<top::WeightOp>();
+    auto biasOp = op.getBias().getDefiningOp<top::WeightOp>();
     bias_new = biasOp.read<int32_t>();
   }
-  auto m_data = Module::getI64Array(multiplier(), attr.oc, 1);
-  auto r_data = Module::getI64Array(rshift(), attr.oc, 0);
+  auto m_data = module::getI64Array(op.getMultiplier(), attr.oc, 1);
+  auto r_data = module::getI64Array(op.getRshift(), attr.oc, 0);
   std::vector<int64_t> packedShape;
   auto packed = packWeight(bias_new, r_data, m_data, attr.oc, packedShape);
   auto packed_type =
-      RankedTensorType::get(packedShape, builder.getIntegerType(8));
+      RankedTensorType::get(packedShape, rewriter.getIntegerType(8));
   auto pack_op = top::WeightOp::create(op, "bias_packed", *packed, packed_type);
   op->removeAttr("rshift");
   op->removeAttr("multiplier");
   op->setOperand(2, pack_op);
   // second lower weight  for groups onnx weight's shape (oc, ic/g, kh, kw)
-  auto filterOp = filter().getDefiningOp<top::WeightOp>();
+  auto filterOp = op.getFilter().getDefiningOp<top::WeightOp>();
   auto filter_i8 = filterOp.read<int8_t>();
   std::vector<int64_t> filter_shape = {attr.oc, attr.ic / attr.groups, attr.kh,
                                        attr.kw};
-  if (attr.dh > 1 || attr.dw > 1) {
+  if (attr.dh > 15 || attr.dw > 15) {
     // TODO do dilation here, ins in top/tpu_common interpreter
     llvm_unreachable("Not supported now");
   }
@@ -204,73 +205,75 @@ void tpu::Conv2DOp::weight_reorder_int8_cv18xx() {
   bool do_ic_alignment = false;
   refactorOddIcConv(filter_i8, filter_shape, attr.groups, do_ic_alignment);
   if (do_ic_alignment) {
-    op->setAttr("use_3ic_optimize", builder.getI64IntegerAttr(4));
+    op->setAttr("use_3ic_optimize", rewriter.getI64IntegerAttr(4));
   }
   // rewrite weightOp
-  auto elem_type = Module::getStorageType(filter());
+  auto elem_type = module::getStorageType(op.getFilter());
   auto filter_type = RankedTensorType::get(filter_shape, elem_type);
   auto weight_op =
       top::WeightOp::create(op, "filter_reordered", *filter_i8, filter_type);
   op->setOperand(1, weight_op);
+  return success();
 }
 
-void tpu::Conv2DOp::weight_reorder_bf16_cv18xx() {
-  conv_attr_t attr = {0};
-  parseParam(&attr);
-  OpBuilder builder(getContext());
-  auto op = getOperation();
+template <>
+LogicalResult WeightReorder<tpu::Conv2DOp, BFloat16Type>::matchAndRewrite(
+    tpu::Conv2DOp op, PatternRewriter &rewriter) const {
+  if (!module::getStorageType(op.getFilter()).isBF16())
+    return failure();
+
+  auto attr = op.parseParam();
   // first lower weight
-  auto filterOp = filter().getDefiningOp<top::WeightOp>();
+  auto filterOp = op.getFilter().getDefiningOp<top::WeightOp>();
   std::vector<int64_t> filter_shape = {attr.oc, attr.ic / attr.groups, attr.kh,
                                        attr.kw};
   auto filter_u16 = filterOp.read<uint16_t>();
-  if (attr.dh > 1 || attr.dw > 1) {
+  if (attr.dh > 15 || attr.dw > 15) {
     // TODO do dilation here, ins in top/tpu_common interpreter
     llvm_unreachable("dilation is not supported now");
   }
   transposeConvolutionFilter(filter_u16, filter_shape);
   // rewrite weightOp
-  auto filter_type = RankedTensorType::get(filter_shape, builder.getBF16Type());
+  auto filter_type =
+      RankedTensorType::get(filter_shape, rewriter.getBF16Type());
   auto weight_op =
       top::WeightOp::create(op, "filter_reordered", *filter_u16, filter_type);
   op->setOperand(1, weight_op);
   // second lower bias if exist
   if (attr.has_bias) {
-    auto biasOp = bias().getDefiningOp<top::WeightOp>();
+    auto biasOp = op.getBias().getDefiningOp<top::WeightOp>();
     auto bias_f32 = biasOp.read<float>();
     std::vector<uint32_t> bias_new(bias_f32->size());
     transposeBiasFp32(bias_f32, bias_new);
     // rewrite biasOp
-    auto new_bias_type = RankedTensorType::get(Module::getShape(bias()),
-                                               builder.getIntegerType(32));
-    // bias().setType(new_bias_type);
+    auto new_bias_type = RankedTensorType::get(module::getShape(op.getBias()),
+                                               rewriter.getIntegerType(32));
+    // getBias().setType(new_bias_type);
     auto lbias_op =
         top::WeightOp::create(op, "bias_reordered", bias_new, new_bias_type);
     op->setOperand(2, lbias_op);
   }
+  return success();
 }
 
 // ======================================
 // GlobalGenInterface
 // ======================================
 
-void tpu::Conv2DOp::codegen_global_cv18xx(void *ctx, int64_t layer_id) {
-  CviBackendContext *backend_ctx = (CviBackendContext *)ctx;
-  conv_attr_t attr = {0};
-  parseParam(&attr);
-  gaddr_t ga_input = Module::getAddress(input());
-  gaddr_t ga_output = Module::getAddress(output());
-  gaddr_t ga_filter = Module::getAddress(filter());
+void tpu::Conv2DOp::codegen_global_cv18xx(int64_t layer_id) {
+  auto attr = parseParam();
+  gaddr_t ga_input = module::getAddress(getInput());
+  gaddr_t ga_output = module::getAddress(getOutput());
+  gaddr_t ga_filter = module::getAddress(getFilter());
   gaddr_t ga_pc_info = GA_INVALID;
-  if (Quant::isUniformQuantized(output()) || attr.has_bias) {
-    ga_pc_info = Module::getAddress(bias());
+  if (module::isUniformQuantized(getOutput()) || attr.has_bias) {
+    ga_pc_info = module::getAddress(getBias());
   }
 
-  auto fliter_shape = Module::getShape(filter());
   bool do_compress = attr.groups > 1 ? false : true;
-  WeightCompresser weight_opt(this->getOperation(), do_compress); // fix me
-  if (Quant::isUniformQuantized(output())) {
-    bool do_ic_alignment = use_3ic_optimize() ? true : false;
+  WeightCompresser weight_opt(this->getOperation(), do_compress);
+  if (module::isUniformQuantized(getOutput())) {
+    bool do_ic_alignment = getUse_3icOptimize() ? true : false;
     gaddr_t ga_scale_lut = GA_INVALID;
     // todo leakyrelu
     int fused_leakyrelu_pos_rshift = 0;
@@ -280,7 +283,6 @@ void tpu::Conv2DOp::codegen_global_cv18xx(void *ctx, int64_t layer_id) {
     float fused_negative_slope = 0.0f; // Todo this->do_leaky_relu()
 
     cvi_backend_tg_fixed_conv_kernel(
-        *backend_ctx,
         layer_id,   // layer_id,
         ga_input,   // input_data_gaddr,
         ga_output,  // output_data_gaddr,
@@ -310,8 +312,7 @@ void tpu::Conv2DOp::codegen_global_cv18xx(void *ctx, int64_t layer_id) {
     bool do_quant = false;
     gaddr_t ga_scale = GA_INVALID;
     gaddr_t ga_zeropoint = GA_INVALID;
-    cvi_backend_tg_bf16_conv_kernel(*backend_ctx,
-                                    layer_id,   // layer_id
+    cvi_backend_tg_bf16_conv_kernel(layer_id,   // layer_id
                                     ga_input,   // input_data_gaddr,
                                     ga_output,  // output_data_gaddr,
                                     ga_filter,  // weight_data_gaddr,
@@ -338,7 +339,6 @@ void tpu::Conv2DOp::codegen_global_cv18xx(void *ctx, int64_t layer_id) {
 int64_t tpu::Conv2DOp::getBufferSize_cv18xx(
     int64_t in_lmem_bytes, int64_t out_lmem_bytes, int64_t in_nslice,
     int64_t in_hslice, int64_t out_nslice, int64_t out_hslice) {
-  int64_t sz = out_lmem_bytes * sizeof(int32_t);
   llvm_unreachable("Not supported now");
   return 0;
 }

@@ -9,12 +9,11 @@
 
 #include "tpu_mlir/Dialect/Tpu/IR/TpuOps.h"
 #include "tpu_mlir/Backend/BM168x/BM1684.h"
-#include "tpu_mlir/Support/Helper/Quant.h"
-#include "tpu_mlir/Support/Helper/Module.h"
 
-using namespace mlir;
-using namespace tpu_mlir;
-using namespace tpu_mlir::helper;
+#include "tpu_mlir/Support/Module.h"
+
+
+
 using namespace tpu_mlir::backend;
 
 // =========================================
@@ -31,10 +30,10 @@ void tpu::AddConstOp::codegen_global_bm1684() {
 // =========================================
 
 int64_t tpu::AddConstOp::getBufferSize_bm1684(int64_t in_lmem_bytes,
-                                          int64_t out_lmem_bytes,
-                                          int64_t in_nslice, int64_t in_hslice,
-                                          int64_t out_nslice,
-                                          int64_t out_hslice) {
+                                              int64_t out_lmem_bytes,
+                                              int64_t in_nslice, int64_t in_hslice,
+                                              int64_t out_nslice,
+                                              int64_t out_hslice) {
   return 0;
 }
 

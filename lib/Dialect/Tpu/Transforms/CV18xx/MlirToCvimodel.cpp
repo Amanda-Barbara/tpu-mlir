@@ -11,7 +11,7 @@
 #include "mlir/Support/FileUtilities.h"
 #include "tpu_mlir/Backend/CV18xx/CV18xx.h"
 #include "tpu_mlir/Dialect/Tpu/IR/TpuOps.h"
-#include "tpu_mlir/Support/Helper/Quant.h"
+
 #include "tpu_mlir/Support/MathUtils.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ToolOutputFile.h"
@@ -35,9 +35,8 @@ static llvm::cl::opt<std::string>
 
 #define VERSION(V0, V1, V2) (uint32_t)((V0) << 24 | (V1) << 16 | (V2) << 8)
 
-using namespace tpu_mlir;
 using namespace tpu_mlir::backend;
-using namespace tpu_mlir::helper;
+
 // v1.4.0
 // 1) add scale/mean/pixel_format/align in Tensor
 // 2) add data_format in PreProcessHints
@@ -74,14 +73,13 @@ static void buildInputsOutputs(flatbuffers::FlatBufferBuilder &fbb,
 
   std::vector<flatbuffers::Offset<flatbuffers::String>> fbStrVec;
   for (auto &v : inputs) {
-    auto name = Module::getName(v).str();
+    auto name = module::getName(v).str();
     fbStrVec.push_back(fbb.CreateString(name));
   }
   fbInputs = fbb.CreateVector(fbStrVec);
   fbStrVec.clear();
   for (auto &v : outputs) {
-    auto op = v.getDefiningOp();
-    auto name = Module::getName(v).str();
+    auto name = module::getName(v).str();
     fbStrVec.push_back(fbb.CreateString(name));
   }
   fbOutputs = fbb.CreateVector(fbStrVec);
@@ -102,41 +100,147 @@ static std::string getStrOfCurrentTime() {
   return ssTime.str();
 }
 
+CviCpuRoutine::CviCpuRoutine(flatbuffers::FlatBufferBuilder &fbb,
+                             func::CallOp &call, std::string chip)
+    : CviRoutine(fbb, false, chip) {
+  auto func = module::getFuncOp(call.getCallee());
+  func.walk([&](Operation *op) {
+    if (isa<GlobalGenInterface>(op)) {
+      ops.emplace_back(op);
+      if (isa<tpu::GenericCpuOp>(op)) {
+        op_ = op;
+        name = dyn_cast<tpu::GenericCpuOp>(op).getCpuOpName().str();
+      }
+    }
+  });
+  module::getInputsOutputs(call, inputs, outputs);
+}
+
+void CviCpuRoutine::serializeFuncArgs(std::vector<uint8_t> &args) {
+  flatbuffers::FlatBufferBuilder fbb(1024);
+  flatbuffers::Offset<cvi::cpu_op::Attribute> attr;
+  std::vector<flatbuffers::Offset<cvi::cpu_op::Attribute>> param;
+  auto paramDictAttr = op_->getAttr("param").cast<DictionaryAttr>();
+  for (auto &iter : paramDictAttr) {
+    auto key = iter.getName().str();
+    auto flatKey = fbb.CreateString(key);
+    if (iter.getValue().isa<StringAttr>()) {
+      auto value = iter.getValue().cast<StringAttr>().getValue();
+      std::string strValue = std::string(value.data(), value.size());
+      auto flatValue = fbb.CreateString(strValue);
+      auto strAttr = cvi::cpu_op::CreateStrAttr(fbb, flatKey, flatValue);
+      attr = cvi::cpu_op::CreateAttribute(fbb, 0, 0, 0, strAttr, 0, 0);
+    } else if (iter.getValue().isa<BoolAttr>()) {
+      auto value = iter.getValue().cast<BoolAttr>().getValue();
+      auto boolAttr = cvi::cpu_op::CreateBoolAttr(fbb, flatKey, value);
+      attr = cvi::cpu_op::CreateAttribute(fbb, 0, boolAttr, 0, 0, 0, 0);
+    } else if (iter.getValue().isa<IntegerAttr>()) {
+      auto value = iter.getValue().cast<IntegerAttr>().getInt();
+      auto intAttr = cvi::cpu_op::CreateIntAttr(fbb, flatKey, value);
+      attr = cvi::cpu_op::CreateAttribute(fbb, 0, 0, intAttr, 0, 0, 0);
+    } else if (iter.getValue().isa<FloatAttr>()) {
+      auto value = iter.getValue().cast<FloatAttr>().getValueAsDouble();
+      auto floatAttr = cvi::cpu_op::CreateFloatAttr(fbb, flatKey, value);
+      attr = cvi::cpu_op::CreateAttribute(fbb, floatAttr, 0, 0, 0, 0, 0);
+    } else if (iter.getValue().isa<DenseFPElementsAttr>()) {
+      std::vector<float> fpArray;
+      auto value = iter.getValue().cast<DenseFPElementsAttr>();
+      for (APFloat realVal : value) {
+        fpArray.push_back(realVal.convertToFloat());
+      }
+      auto flatValue = fbb.CreateVector(fpArray);
+      auto fpArrayAttr =
+          cvi::cpu_op::CreateFloatArrayAttr(fbb, flatKey, flatValue);
+      attr = cvi::cpu_op::CreateAttribute(fbb, 0, 0, 0, 0, fpArrayAttr, 0);
+    } else if (iter.getValue().isa<DenseIntElementsAttr>()) {
+      std::vector<int> intArray;
+      auto value = iter.getValue().cast<DenseIntElementsAttr>();
+      for (APInt intVal : value) {
+        intArray.push_back(intVal.getZExtValue());
+      }
+      auto flatValue = fbb.CreateVector(intArray);
+      auto intArrayAttr =
+          cvi::cpu_op::CreateIntArrayAttr(fbb, flatKey, flatValue);
+      attr = cvi::cpu_op::CreateAttribute(fbb, 0, 0, 0, 0, 0, intArrayAttr);
+    } else if (iter.getValue().isa<ArrayAttr>()) {
+      auto value = iter.getValue().cast<ArrayAttr>();
+      if ((*value.begin()).dyn_cast_or_null<IntegerAttr>()) {
+        std::vector<int> intArray;
+
+        for (auto &intVal : value) {
+          intArray.push_back(intVal.cast<IntegerAttr>().getInt());
+        }
+        auto flatValue = fbb.CreateVector(intArray);
+        auto intArrayAttr =
+            cvi::cpu_op::CreateIntArrayAttr(fbb, flatKey, flatValue);
+        attr = cvi::cpu_op::CreateAttribute(fbb, 0, 0, 0, 0, 0, intArrayAttr);
+      } else {
+        llvm_unreachable("unsupported type, only support i32 array parsing");
+      }
+    } else {
+      llvm_unreachable("unsupported type");
+    }
+    param.push_back(attr);
+  }
+
+  auto fbParam = cvi::cpu_op::CreateParameterDirect(fbb, &param);
+  fbb.Finish(fbParam);
+
+  uint8_t *ptr = fbb.GetBufferPointer();
+  for (uint32_t i = 0; i < fbb.GetSize(); i++) {
+    args.push_back(*ptr++);
+  }
+}
+
+flatbuffers::Offset<Routine> CviCpuRoutine::build() {
+  FBStringVector fbInputs, fbOutputs;
+  // For some cpu functions, weightOp maybe the operand and the weightOp's name
+  // should be added to the inputs.
+  inputs.clear();
+  for (auto v : this->op_->getOperands()) {
+    inputs.push_back(v);
+  }
+  buildInputsOutputs(fbb_, inputs, outputs, fbInputs, fbOutputs);
+  std::vector<uint8_t> args;
+  serializeFuncArgs(args);
+  auto fbName = fbb_.CreateString(name);
+  auto fbRoutine = CreateCpuRoutineDirect(fbb_, name.c_str(), &args);
+  return CreateRoutine(fbb_, RoutineType_CPU, fbInputs, fbOutputs, 0,
+                       fbRoutine);
+}
+
 CviTpuRoutine::CviTpuRoutine(flatbuffers::FlatBufferBuilder &fbb,
                              func::CallOp &call, int *layer_id,
                              std::string chip)
     : CviRoutine(fbb, true, chip) {
   this->layer_id = layer_id;
-  auto func = Module::getFuncOp(Module::getModuleOp(call), call.getCallee());
+  auto func = module::getFuncOp(call.getCallee());
   name = func.getName().str();
   func.walk([&](Operation *op) {
-    if (isa<GlobalGenInterface>(op) && !Module::isOpInGroup(op)) {
+    if (isa<GlobalGenInterface>(op) && !module::isOpInGroup(op)) {
       ops.push_back(op);
     }
   });
-  Module::getInputsOutputs(call, inputs, outputs);
+  module::getInputsOutputs(call, inputs, outputs);
   codeGen();
 }
 
 void CviTpuRoutine::codeGen() {
-  auto backend_ctx = cvi_backend_create_context(chip.c_str());
   for (auto op : ops) {
     if (auto castOp = dyn_cast<tpu::GroupOp>(op)) {
-      // cvi_backend_set_layer_id(backend_ctx, layer_id);
       // codegen_for_group(castOp)
       llvm_unreachable("layer group not support now");
-    } else if (Module::isOpInGroup(op)) {
+    } else if (module::isOpInGroup(op)) {
       // continue
     } else if (auto castOp = dyn_cast<GlobalGenInterface>(op)) {
-      cvi_backend_set_layer_id(backend_ctx, *layer_id);
-      castOp.codegen_global_cv18xx(backend_ctx, *layer_id);
+      CV18xx::set_layer_id(*layer_id);
+      castOp.codegen_global_cv18xx(*layer_id);
     }
     ++(*layer_id);
     // sotre neuron
   }
-  cvi_backend_submit(backend_ctx);
-  cvi_backend_get_cmdbuf(backend_ctx, cmdbuf);
-  cvi_backend_delete_context(backend_ctx);
+  CV18xx::submit();
+  CV18xx::read_cmdbuf(cmdbuf);
 }
 
 flatbuffers::Offset<Routine> CviTpuRoutine::build() {
@@ -150,31 +254,29 @@ flatbuffers::Offset<Routine> CviTpuRoutine::build() {
 
 CviModelBuilder::CviModelBuilder(ModuleOp &module) : fbb_(1024) {
   int layer_id = 0;
-  this->chip = std::string(Module::getChip(module).lower());
-  privateGmemSize_ = Module::getGmemPrivateSize(module);
-  sharedGmemSize_ = Module::getNeuronSize(module);
+  this->chip = std::string(module::getChip().lower());
+  privateGmemSize_ = module::getGmemPrivateSize();
+  sharedGmemSize_ = module::getNeuronSize();
   version_ = get_version(majorVersion_, minorVersion_, subMinorVersion_);
-  modelName_ = Module::getName(module).str();
-  coeff_size = Module::getCoeffSize(module); // set in assignAddr
-  auto main_func = Module::getMainFuncOp(module);
+  modelName_ = module::getModuleName().str();
+  coeff_size = module::getCoeffSize(); // set in assignAddr
+  auto main_func = module::getMainFuncOp();
   main_func.walk([&](func::CallOp call) { addRoutine(call, &layer_id); });
-  Module::removeUnusedOp(module);
   for (auto func : module.getOps<FuncOp>()) {
     func.walk([&](top::WeightOp op) { weights.push_back(op); });
   }
-  Module::getInputsOutputs(module, inputs, outputs);
+  module::getInputsOutputs(inputs, outputs);
 }
 
 void CviModelBuilder::addRoutine(func::CallOp &call, int *layer_id) {
   // todo support cpu sub_fun
-  auto func = Module::getFuncOp(Module::getModuleOp(call), call.getCallee());
-  bool tpu = Module::getMode(func).str() == "TPU" ? true : false;
+  auto func = module::getFuncOp(call.getCallee());
+  bool tpu = module::getFuncMode(func).str() == "TPU" ? true : false;
   CviRoutine *rt = nullptr;
   if (tpu) {
     rt = new CviTpuRoutine(fbb_, call, layer_id, chip);
   } else {
-    llvm_unreachable("not support now");
-    // rt = new CviCpuRoutine(fbb_, mainFunc_, funcName);
+    rt = new CviCpuRoutine(fbb_, call, chip);
   }
   routines_.push_back(rt);
 }
@@ -182,7 +284,6 @@ void CviModelBuilder::addRoutine(func::CallOp &call, int *layer_id) {
 FBSection CviModelBuilder::buildSection(std::string name,
                                         cvi::model::SectionType type) {
   auto fbName = fbb_.CreateString(name);
-  uint32_t size = 0;
   uint32_t offset = 0;
   auto data_u8 = std::make_shared<std::vector<uint8_t>>(coeff_size, 0);
   for (auto weight : weights) {
@@ -226,9 +327,11 @@ FBSectionVector CviModelBuilder::buildSections() {
   for (auto rt : routines_) {
     if (rt->isTpuRoutine) {
       auto tpuRt = (CviTpuRoutine *)rt;
-      auto cmdbufSec =
-          buildSection(tpuRt->name, SectionType_CMDBUF, tpuRt->cmdbuf);
-      sectionVec.push_back(cmdbufSec);
+      if (tpuRt->cmdbuf.size()) {
+        auto cmdbufSec =
+            buildSection(tpuRt->name, SectionType_CMDBUF, tpuRt->cmdbuf);
+        sectionVec.push_back(cmdbufSec);
+      }
     }
   }
   return fbb_.CreateVector(sectionVec);
@@ -254,11 +357,11 @@ FBModel CviModelBuilder::build() {
 
 void CviModelBuilder::parseOpInfo(Operation *op, std::string &name,
                                   std::vector<int64_t> &shape, size_t &size,
-                                  int64_t &offset, DType &dtype) {
-  auto v = op->getResult(0);
-  name = Module::getName(v).str();
-  auto tensorShape = Module::getShape(v);
-  auto type = Module::getStorageType(v);
+                                  int64_t &offset, DType &dtype, uint32_t idx) {
+  auto v = op->getResult(idx);
+  name = module::getName(v).str();
+  auto tensorShape = module::getShape(v);
+  auto type = module::getStorageType(v);
   auto bits = type.getIntOrFloatBitWidth();
   int dsize = -1;
   if (type.isUnsignedInteger()) {
@@ -316,16 +419,16 @@ void CviModelBuilder::parseOpInfo(Operation *op, std::string &name,
     size *= shape[i];
   }
   // TODO if is group op get yeild addr
-  offset = Module::getAddress(v);
+  offset = module::getAddress(v);
 }
 
-flatbuffers::Offset<Tensor> CviModelBuilder::buildNeuron(opInfo &op_info) {
+flatbuffers::Offset<Tensor> CviModelBuilder::buildNeuron(op_info_t &op_info) {
 
   // quant info
   float qscale = 0.0f; // fix me sophone set 1.0
   QuantType quant_type = QuantType_NONE;
-  if (Quant::isUniformQuantized(op_info.op->getResult(0))) {
-    auto qtype = Quant::getUniformQuantizedType(op_info.op->getResult(0));
+  if (module::isUniformQuantized(op_info.op->getResult(op_info.idx))) {
+    auto qtype = module::getUniformQuantizedType(op_info.op->getResult(0));
     qscale = qtype.getScale();
     if (isa<top::InputOp>(op_info.op->getResult(0).getDefiningOp())) {
       qscale = 1. / qscale;
@@ -355,7 +458,7 @@ FBWeightVector CviModelBuilder::buildWeightMap() {
     int64_t offset;
     size_t size;
     DType dtype;
-    parseOpInfo(op, name, shape, size, offset, dtype);
+    parseOpInfo(op, name, shape, size, offset, dtype, 0);
     auto fbName = fbb_.CreateString(name);
     auto fbShape = CreateShapeDirect(fbb_, &shape);
     auto fbWeight = CreateWeight(fbb_, fbName, offset, size, fbShape, dtype);
@@ -364,9 +467,9 @@ FBWeightVector CviModelBuilder::buildWeightMap() {
   return fbb_.CreateVector(fbWeightVec);
 }
 
-void markGmemReusedOp(std::vector<opInfo> &ops,
-                      std::set<Operation *> &gmemReusedSet) {
-  std::vector<opInfo *> tmp;
+void markGmemReusedOp(std::vector<op_info_t> &ops,
+                      std::set<op_info_t *> &gmemReusedSet) {
+  std::vector<op_info_t *> tmp;
   for (int i = ops.size() - 1; i >= 0; i--) {
     auto addr_i = ops[i].offset;
     auto sz_i = ops[i].size;
@@ -377,7 +480,7 @@ void markGmemReusedOp(std::vector<opInfo> &ops,
       auto end = std::max(addr_i + sz_i, addr_j + sz_j);
       // memory overlap
       if (end - start < sz_i + sz_j) {
-        gmemReusedSet.insert(ops[i].op);
+        gmemReusedSet.insert(&ops[i]);
       }
     }
     tmp.emplace_back(&ops[i]);
@@ -386,15 +489,16 @@ void markGmemReusedOp(std::vector<opInfo> &ops,
 
 FBTensorVector CviModelBuilder::buildNeuronMap() {
   std::vector<flatbuffers::Offset<Tensor>> tensorVec;
-  std::vector<opInfo> ops;
+  std::vector<op_info_t> ops;
   for (auto v : inputs) {
     auto inputOp = v.getDefiningOp();
-    opInfo op_info;
+    op_info_t op_info;
     op_info.op = inputOp;
     op_info.overwrite = false;
     op_info.shape.resize(4, 1);
+    op_info.idx = 0;
     parseOpInfo(inputOp, op_info.name, op_info.shape, op_info.size,
-                op_info.offset, op_info.dtype);
+                op_info.offset, op_info.dtype, op_info.idx);
     ops.emplace_back(op_info);
   }
   for (auto rt : routines_) {
@@ -402,19 +506,24 @@ FBTensorVector CviModelBuilder::buildNeuronMap() {
       if (isa<tpu::GroupOp>(neuronOp)) {
         llvm_unreachable("Not support layerGroup now");
       }
-      opInfo op_info;
-      op_info.op = neuronOp;
-      op_info.overwrite = false;
-      op_info.shape.resize(4, 1);
-      parseOpInfo(neuronOp, op_info.name, op_info.shape, op_info.size,
-                  op_info.offset, op_info.dtype);
-      ops.emplace_back(op_info);
+      for (uint32_t i = 0; i < neuronOp->getNumResults(); ++i) {
+        if (!neuronOp->getResults()[i].getType().isa<mlir::NoneType>()) {
+          op_info_t op_info;
+          op_info.op = neuronOp;
+          op_info.overwrite = false;
+          op_info.shape.resize(4, 1);
+          op_info.idx = i;
+          parseOpInfo(neuronOp, op_info.name, op_info.shape, op_info.size,
+                      op_info.offset, op_info.dtype, op_info.idx);
+          ops.emplace_back(op_info);
+        }
+      }
     }
   }
-  std::set<Operation *> op_reused;
+  std::set<op_info_t *> op_reused;
   markGmemReusedOp(ops, op_reused);
   for (auto &op_info : ops) {
-    if (op_reused.find(op_info.op) != op_reused.end()) {
+    if (op_reused.find(&op_info) != op_reused.end()) {
       op_info.overwrite = true;
     }
     tensorVec.emplace_back(buildNeuron(op_info));

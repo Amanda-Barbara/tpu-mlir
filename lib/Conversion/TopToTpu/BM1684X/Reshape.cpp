@@ -21,7 +21,10 @@ void ReshapeLowering::LoweringINT8(PatternRewriter &rewriter, top::ReshapeOp op,
                                    bool asymmetric) const {
   lowering_common_int8<tpu::ReshapeOp>(rewriter, op, asymmetric);
 }
-
+void ReshapeLowering::LoweringINT4(PatternRewriter &rewriter, top::ReshapeOp op,
+                                   bool asymmetric) const {
+  LoweringINT8(rewriter, op, asymmetric);
+}
 void ReshapeLowering::LoweringBF16(PatternRewriter &rewriter,
                                    top::ReshapeOp op) const {
   lowering_common_bf16<tpu::ReshapeOp>(rewriter, op);
@@ -34,7 +37,7 @@ void ReshapeLowering::LoweringF16(PatternRewriter &rewriter,
 
 void ReshapeLowering::LoweringQuantized(PatternRewriter &rewriter,
                                         top::ReshapeOp op) const {
-  lowering_common<tpu::ReshapeOp>(rewriter, op, op.output().getType());
+  lowering_common<tpu::ReshapeOp>(rewriter, op, op.getOutput().getType());
 }
 
 } // namespace bm1684x

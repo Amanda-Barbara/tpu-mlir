@@ -14,7 +14,7 @@ namespace bm1684x {
 
 void Depth2SpaceLowering::LoweringF32(PatternRewriter &rewriter,
                                       top::Depth2SpaceOp op) const {
-  lowering_common_f32<tpu::Depth2SpaceOp>(rewriter, op.getOperation());
+  lowering_common_f32<tpu::Depth2SpaceOp>(rewriter, op);
 }
 
 void Depth2SpaceLowering::LoweringINT8(PatternRewriter &rewriter,
@@ -23,21 +23,24 @@ void Depth2SpaceLowering::LoweringINT8(PatternRewriter &rewriter,
   lowering_common_int8<tpu::Depth2SpaceOp>(rewriter, op.getOperation(),
                                            asymmetric);
 }
-
+void Depth2SpaceLowering::LoweringINT4(PatternRewriter &rewriter, top::Depth2SpaceOp op,
+                                   bool asymmetric) const {
+  LoweringINT8(rewriter, op, asymmetric);
+}
 void Depth2SpaceLowering::LoweringBF16(PatternRewriter &rewriter,
                                        top::Depth2SpaceOp op) const {
-  lowering_common_bf16<tpu::Depth2SpaceOp>(rewriter, op.getOperation());
+  lowering_common_bf16<tpu::Depth2SpaceOp>(rewriter, op);
 }
 
 void Depth2SpaceLowering::LoweringF16(PatternRewriter &rewriter,
                                       top::Depth2SpaceOp op) const {
-  lowering_common_f16<tpu::Depth2SpaceOp>(rewriter, op.getOperation());
+  lowering_common_f16<tpu::Depth2SpaceOp>(rewriter, op);
 }
 
 void Depth2SpaceLowering::LoweringQuantized(PatternRewriter &rewriter,
                                             top::Depth2SpaceOp op) const {
   lowering_common<tpu::Depth2SpaceOp>(rewriter, op.getOperation(),
-                                      op.output().getType());
+                                      op.getOutput().getType());
 }
 
 } // namespace bm1684x

@@ -13,16 +13,15 @@
 using namespace mlir;
 
 namespace tpu_mlir {
-
 constexpr llvm::StringRef LocalGenInterface::kLayerGroupAttrName;
 void LocalGenInterface::fixSlice(int64_t &in_idx, int64_t &in_slice,
-                                 int64_t in_length) {
+                                 int64_t in_length, bool last) {
   // avoid leak
   auto end_idx = in_idx + in_slice;
   if (in_idx < 0) {
     in_idx = 0;
   }
-  if (end_idx > in_length) {
+  if (end_idx > in_length || last) {
     end_idx = in_length;
   }
   in_slice = end_idx - in_idx;
@@ -30,16 +29,36 @@ void LocalGenInterface::fixSlice(int64_t &in_idx, int64_t &in_slice,
 
 group_info_t LocalGenInterface::getGroupInfo(mlir::Value v, int64_t n_step,
                                              int64_t h_step) {
-  return getGroupInfo(v.getDefiningOp(), n_step, h_step);
+  auto op = v.getDefiningOp();
+  if (op == nullptr || !op->hasAttr(LocalGenInterface::kLayerGroupAttrName)) {
+    // generate ginfo
+    group_info_t ginfo = {0};
+    if (v.getType().isa<NoneType>()) {
+      return ginfo;
+    }
+    auto dst_op = *v.getUsers().begin();
+    auto dst_lg_op = cast<LocalGenInterface>(dst_op);
+    auto g_param = dst_op->getAttr(LocalGenInterface::kLayerGroupAttrName)
+                       .cast<tpu::LayerGroupAttr>();
+    int64_t nslice = g_param.getNSlice()[0];
+    int64_t hslice = g_param.getHSlice()[0];
+    dst_lg_op.BackwardN(ginfo.n_idx, ginfo.n_slice, 0, nslice);
+    dst_lg_op.BackwardH(ginfo.h_idx, ginfo.h_slice, 0, hslice);
+    return ginfo;
+  }
+  return getGroupInfo(op, n_step, h_step);
 }
 
 group_info_t LocalGenInterface::getGroupInfo(mlir::Operation *op,
                                              int64_t n_step, int64_t h_step) {
+  group_info_t ginfo = {0};
+  if (isa<top::NoneOp>(op)) {
+    return ginfo;
+  }
   assert(op != nullptr);
   assert(op->hasAttr(LocalGenInterface::kLayerGroupAttrName));
   auto g_param = op->getAttr(LocalGenInterface::kLayerGroupAttrName)
                      .cast<tpu::LayerGroupAttr>();
-  group_info_t ginfo = {0};
   ginfo.id = g_param.getId();
   ginfo.stage = g_param.getStage();
   ginfo.out_addr = g_param.getOutAddr();
@@ -54,7 +73,7 @@ group_info_t LocalGenInterface::getGroupInfo(mlir::Operation *op,
   if (n_idx_v.empty() && h_idx_v.empty()) {
     int64_t n, c, h, w;
     ginfo.overstepped = !(n_step == 0 && h_step == 0);
-    Module::getNCHW(op->getResult(0), n, c, h, w);
+    module::getNCHW(op->getResult(0), n, c, h, w);
     ginfo.n_slice = n;
     ginfo.h_slice = h;
   } else {

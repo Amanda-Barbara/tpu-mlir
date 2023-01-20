@@ -9,7 +9,9 @@ from .MLIRImporter import MLIRImporter
 from .BaseConverter import BaseConverter
 import numpy as np
 
+import math
 import caffe
+import torch
 from caffe.proto import caffe_pb2
 from google.protobuf import text_format
 from utils.pad_setting import set_caffe_pad
@@ -25,6 +27,20 @@ class CaffeConverter(BaseConverter):
                  output_names: list,
                  preprocess_args=None):
         super().__init__()
+        # yapf: disable
+        # for caffe v1
+        self.layer_type = {
+            0: 'None', 35: 'Absval', 1: 'Accuracy', 30: 'Argmax', 2: 'Bnll',
+            3: 'Concat', 37: 'ContrastiveLoss', 4: 'Convolution', 5: 'Data',
+            39: 'Deconvolution', 6: 'Dropout', 32: 'DummyData', 7: 'EuclideanLoss',
+            25: 'Eltwise', 38: 'Exp', 8: 'Flatten', 9: 'Hdf5Data', 10: 'Hdf5Output',
+            28: 'HingeLoss', 11: 'Im2col', 12: 'ImageData', 13: 'InfogainLoss',
+            14: 'InnerProduct', 15: 'LRN', 29: 'MemoryData', 16: 'MultinomialLogisticLoss',
+            34: 'MVN', 17: 'Pooling', 26: 'Power', 18: 'ReLU', 19: 'Sigmoid',
+            27: 'SigmoidCrossEntropyLoss', 36: 'Silence', 20: 'Softmax', 21: 'SoftmaxLoss',
+            22: 'Split', 33: 'Slice', 23: 'Tanh', 24: 'WindowData', 31: 'Threshold', 32: 'Relu6',
+        }
+        # yapf: enable
         self.model_name = model_name
         self.prototxt = prototxt
         self.caffemodel = caffemodel
@@ -96,20 +112,7 @@ class CaffeConverter(BaseConverter):
             'YoloDetection': lambda layer: self.convert_yolo_detection_op(layer),
             'MatMul': lambda layer: self.convert_matmul_op(layer),
         }
-        # yapf: disable
-        # for caffe v1
-        self.layer_type = {
-            0: 'None', 35: 'Absval', 1: 'Accuracy', 30: 'Argmax', 2: 'Bnll',
-            3: 'Concat', 37: 'ContrastiveLoss', 4: 'Convolution', 5: 'Data',
-            39: 'Deconvolution', 6: 'Dropout', 32: 'DummyData', 7: 'EuclideanLoss',
-            25: 'Eltwise', 38: 'Exp', 8: 'Flatten', 9: 'Hdf5Data', 10: 'Hdf5Output',
-            28: 'HingeLoss', 11: 'Im2col', 12: 'ImageData', 13: 'InfogainLoss',
-            14: 'InnerProduct', 15: 'LRN', 29: 'MemoryData', 16: 'MultinomialLogisticLoss',
-            34: 'MVN', 17: 'Pooling', 26: 'Power', 18: 'ReLU', 19: 'Sigmoid',
-            27: 'SigmoidCrossEntropyLoss', 36: 'Silence', 20: 'Softmax', 21: 'SoftmaxLoss',
-            22: 'Split', 33: 'Slice', 23: 'Tanh', 24: 'WindowData', 31: 'Threshold', 32: 'Relu6',
-        }
-        # yapf: enable
+
 
     def __del__(self):
         if self.mlir != None:
@@ -153,6 +156,11 @@ class CaffeConverter(BaseConverter):
             input_shapes.append(self.getShape(_name))
         output_shapes = list()
         for _name in self.select_outputs:
+            o_shape = self.getShape(_name)
+            for layer in self.layers:
+                if layer.name == _name and self.layerType(layer) == "DetectionOutput":
+                    o_shape[2] = layer.detection_output_param.keep_top_k
+                    break
             output_shapes.append(self.getShape(_name))
         # init importer
         self.mlir = MLIRImporter(input_shapes, output_shapes, self.model_name)
@@ -214,10 +222,21 @@ class CaffeConverter(BaseConverter):
         self.WeightToNpz(self.weight_file)
         print("Save mlir file: {}".format(mlir_file))
 
-    def blob_to_weight_op(self, layer, index):
+    def blob_to_weight_op(self, layer, index, shape: list = [], permute_order=[]):
         name = layer.name + "_{}".format(index)
         blob = self.layer_dict[layer.name].blobs[index]
-        return self.create_weight_op(name, blob.data)
+        if permute_order != None and len(permute_order) != 0:
+            value = blob.data
+            value_tensor = torch.tensor(value)
+            value_tensor = value_tensor.permute(permute_order)
+            value = np.array(value_tensor)
+            data = value
+        else:
+            data = blob.data
+        if shape:
+            assert (np.prod(data.shape) == np.prod(shape))
+            data = data.reshape(shape)
+        return self.create_weight_op(name, data)
 
     def create_weight_op(self, name, data):
         self.addWeight(name, data)
@@ -318,8 +337,6 @@ class CaffeConverter(BaseConverter):
         output_shape = input_shape
         attrs = {'name': self.get_loc(layer.top[0])}
         assert (num_dims == 4 or num_dims == 2)
-        if num_dims == 2:
-            raise RuntimeError("Not support now, shape {}".format(input_shape))
         if len(layer.bottom) == 2:
             op1 = self.getOperand(layer.bottom[1])
             input_shape1 = self.getShape(layer.bottom[1])
@@ -334,13 +351,18 @@ class CaffeConverter(BaseConverter):
             if layer.scale_param.bias_term:
                 bias_op = self.blob_to_weight_op(layer, 1)
             else:
-                bias_op = self.create_weight_op(
-                    layer.name + "_1", np.zeros(self.getShape(layer.bottom[1]), np.float32))
+                if len(layer.bottom) > 1:
+                    bias_op = self.create_weight_op(
+                        layer.name + "_1", np.zeros(self.getShape(layer.bottom[1]), np.float32))
+                else:
+                    bias_op = self.create_weight_op(layer.name + "_1",
+                                                    np.zeros(input_shape[1], np.float32))
+
             new_op = self.mlir.create_scale_op([in_op, scale_op, bias_op], output_shape, **attrs)
             self.addOperand(layer.top[0], new_op)
 
     def convert_relu_op(self, layer):
-        assert (layer.type == "ReLU")
+        assert (self.layerType(layer) == "ReLU")
         op = self.getOperand(layer.bottom[0])
         input_shape = self.getShape(layer.bottom[0])
         output_shape = input_shape
@@ -353,7 +375,7 @@ class CaffeConverter(BaseConverter):
         self.addOperand(layer.top[0], new_op)
 
     def convert_pooling_op(self, layer):
-        assert (layer.type == "Pooling")
+        assert (self.layerType(layer) == "Pooling")
         input_shape = self.getShape(layer.bottom[0])
         output_shape = self.getShape(layer.top[0])
         op = self.getOperand(layer.bottom[0])
@@ -377,8 +399,7 @@ class CaffeConverter(BaseConverter):
                 leading_pad = [p.pad, p.pad]
             else:
                 leading_pad = [p.pad_h, p.pad_w]
-            pads = set_caffe_pad(input_shape, output_shape, kernel_shape,
-                                 strides, leading_pad)
+            pads = set_caffe_pad(input_shape, output_shape, kernel_shape, strides, leading_pad)
         else:
             pads = [0] * 4
             strides = [1] * 2
@@ -411,9 +432,8 @@ class CaffeConverter(BaseConverter):
         else:
             raise RuntimeError("Method {} not support".format(method))
 
-
     def convert_eltwise_op(self, layer):
-        assert (layer.type == "Eltwise")
+        assert (self.layerType(layer) == "Eltwise")
         operands = list()
         for bottom in layer.bottom:
             op = self.getOperand(bottom)
@@ -482,11 +502,17 @@ class CaffeConverter(BaseConverter):
         if hasattr(p, 'bn_mode'):
             bn_mode = p.bn_mode
 
-        attrs = {'variance_epsilon': 1e-5, 'frozen': False, 'name': self.get_loc(layer.top[0])}
+        attrs = {
+            'variance_epsilon': 1e-5,
+            'epsilon': 1e-5,
+            'frozen': False,
+            'name': self.get_loc(layer.top[0])
+        }
 
         if layer.HasField('bn_param'):
             if layer.bn_param.HasField('eps'):
                 attrs['variance_epsilon'] = layer.bn_param.eps
+                attrs['epsilon'] = layer.bn_param.eps
 
             if layer.bn_param.HasField('frozen'):
                 attrs['frozen'] = layer.bn_param.frozen
@@ -503,6 +529,9 @@ class CaffeConverter(BaseConverter):
             new_op = self.mlir.create_scale_op(operands, output_shape, **attrs)
             self.addOperand(layer.top[0], new_op)
         else:
+            if len(operands) == 5:
+                operands[1], operands[3] = operands[3], operands[1]
+                operands[2], operands[4] = operands[4], operands[2]
             new_op = self.mlir.create_batchnorm_op(operands, output_shape, **attrs)
             self.addOperand(layer.top[0], new_op)
 
@@ -534,15 +563,124 @@ class CaffeConverter(BaseConverter):
 
     def convert_crop_op(self, layer):
         assert (self.layerType(layer) == 'Crop')
-        raise RuntimeError("not implemented")
+        in_op = self.getOperand(layer.bottom[0])
+        input_shape = self.getShape(layer.bottom[0])
+        input_dim = len(input_shape)
+        p = layer.crop_param
+        axis_index = p.axis
+        start_axis = axis_index
+        offset_size = len(p.offset)
+        crop_offset = [0] * input_dim
+        crop_step = [1] * input_dim
+        if offset_size > 1:
+            assert (offset_size + axis_index <= input_dim)
+        for i in range(input_dim):
+            offset = 0
+            if i >= start_axis:
+                if offset_size == 1:
+                    # If only one offset is given, all crops have the same offset.
+                    offset = p.offset[0]
+                elif offset_size > 1:
+                    # For several offsets, the number of offsets must be equal to the
+                    # number of dimensions to crop, that is dimensions after the axis.
+                    offset = p.offset[i - start_axis]
+            crop_offset[i] = offset
+
+        attrs = {
+            'name': self.get_loc(layer.top[0]),
+            'offset': list(crop_offset),
+            'steps': list(crop_step)
+        }
+        output_shape = self.getShape(layer.top[0])
+        new_op = self.mlir.create_slice_op([in_op], output_shape, **attrs)
+        self.addOperand(layer.top[0], new_op)
 
     def convert_deconvolution_op(self, layer):
         assert (self.layerType(layer) == "Deconvolution")
-        raise RuntimeError("not implemented")
+        input_shape = self.getShape(layer.bottom[0])
+        p = layer.convolution_param
+        oc = p.num_output
+        dim = len(input_shape) - 2
+        g = p.group
+        kernel = [0, 0]
+        if len(p.kernel_size) != 0:
+            kernel[0] = p.kernel_size[1] if len(p.kernel_size) > 1 else p.kernel_size[0]
+            kernel[1] = p.kernel_size[0]
+        if p.HasField('kernel_h'):
+            kernel[0] = p.kernel_h
+        if p.HasField('kernel_w'):
+            kernel[1] = p.kernel_w
+        stride = [1, 1]
+        if len(p.stride) != 0:
+            stride[0] = p.stride[1] if len(p.stride) > 1 else p.stride[0]
+            stride[1] = p.stride[0]
+        if p.HasField('stride_h'):
+            stride[0] = p.stride_h
+        if p.HasField('stride_w'):
+            stride[1] = p.stride_w
+        padding = [0, 0]
+        if len(p.pad) != 0:
+            padding[0] = p.pad[1] if len(p.pad) > 1 else p.pad[0]
+            padding[1] = p.pad[0]
+        if p.HasField('pad_h'):
+            padding[0] = p.pad_h
+        if p.HasField('pad_w'):
+            padding[1] = p.pad_w
+        dilation = [1, 1]
+        if len(p.dilation) != 0:
+            dilation[0] = p.dilation[1] if len(p.dilation) > 1 else p.dilation[0]
+            dilation[1] = p.dilation[0]
+        in_op = self.getOperand(layer.bottom[0])
+        permute_order = [1, 0, 2, 3]
+        filter_op = self.blob_to_weight_op(layer, 0, [], permute_order)
+        bias_op = self.mlir.none_op
+        if p.bias_term:
+            bias_op = self.blob_to_weight_op(layer, 1)
+        attrs = {
+            'name': self.get_loc(layer.top[0]),
+            'kernel_shape': kernel,
+            'strides': stride,
+            'dilations': dilation,
+            'pads': padding * dim,
+            'group': g,
+            'do_relu': False,
+            'ins': [],
+        }
+        output_shape = self.getShape(layer.top[0])
+        new_op = self.mlir.create_conv_transpose_op([in_op, filter_op, bias_op], output_shape,
+                                                    **attrs)
+        self.addOperand(layer.top[0], new_op)
 
     def convert_detection_output_op(self, layer):
         assert (self.layerType(layer) == "DetectionOutput")
-        raise RuntimeError("not implemented")
+        in_op = self.getOperand(layer.bottom[0])
+        input_shape = self.getShape(layer.bottom[0])
+        operands = list()
+        for bottom in layer.bottom:
+            op = self.getOperand(bottom)
+            operands.append(op)
+        p = layer.detection_output_param
+        code_type = "CORNER"
+        if p.code_type == 2:
+            code_type = "CENTER_SIZE"
+        elif p.code_type == 3:
+            code_type = "CORNER_SIZE"
+        param = {
+            'name': self.get_loc(layer.top[0]),
+            'num_classes': p.num_classes,
+            'share_location': p.share_location,
+            'background_label_id': p.background_label_id,
+            'nms_threshold': p.nms_param.nms_threshold,
+            'top_k': p.nms_param.top_k,
+            'code_type': code_type,
+            'keep_top_k': p.keep_top_k,
+            'confidence_threshold': p.confidence_threshold
+        }
+        assert (1.0 == p.nms_param.eta)
+        assert (False == p.variance_encoded_in_target)
+        output_shape = [input_shape[0], 1, p.keep_top_k, 7]
+        new_op = self.mlir.create_detection_output_op(operands, output_shape, **param)
+        self.addOperand(layer.top[0], new_op)
 
     def convert_dropout_op(self, layer):
         assert (self.layerType(layer) == 'Dropout')
@@ -559,7 +697,16 @@ class CaffeConverter(BaseConverter):
 
     def convert_flatten_op(self, layer):
         assert (self.layerType(layer) == 'Flatten')
-        raise RuntimeError("not implemented")
+        in_op = self.getOperand(layer.bottom[0])
+        input_shape = self.getShape(layer.bottom[0])
+        num_dims = len(input_shape)
+        assert (num_dims > 1)
+        output_shape = [input_shape[0], 1]
+        for i in range(1, num_dims):
+            output_shape[1] *= input_shape[i]
+        param = {'name': self.get_loc(layer.top[0])}
+        new_op = self.mlir.create_reshape_op([in_op], output_shape, **param)
+        self.addOperand(layer.top[0], new_op)
 
     def convert_frcn_detection_op(self, layer):
         assert (self.layerType(layer) == 'FrcnDetection')
@@ -567,19 +714,215 @@ class CaffeConverter(BaseConverter):
 
     def convert_interp_op(self, layer):
         assert (self.layerType(layer) == 'Interp')
-        raise RuntimeError("not implemented")
+        #
+        # all settings:
+        #
+        #height:33 width:65 (1, 1024, 1, 1)->(1, 1024, 33, 65)
+        #shrink_factor:2 (1, 3, 1025, 2049)->(1, 3, 513, 1025)
+        #zoom_factor: 2(1, 256, 33, 65)->(1, 256, 65, 129)
+        #pad_beg:0
+        #pad_end:0
+        # plz refer \interp_layer.cpp:30 for more parsing priority info
+
+        in_op = self.getOperand(layer.bottom[0])
+        input_shape = self.getShape(layer.bottom[0])
+        output_shape = list(input_shape)
+        p = layer.interp_param
+
+        assert (len(input_shape) == 4 and "current only support 4 dims")
+        assert ((p.pad_beg >= 0 and p.pad_end >= 0) and "pad only support positive")
+
+        # append pad
+        after_h = input_shape[2] + p.pad_beg + p.pad_end
+        after_w = input_shape[3] + p.pad_beg + p.pad_end
+
+        # only deal with > case
+        def shrink(after_h, after_w, p):
+            assert (p.shrink_factor >= 1 and "p.shrink_factor should > 1")
+            after_h = math.floor((after_h - 1) / p.shrink_factor) + 1
+            after_w = math.floor((after_w - 1) / p.shrink_factor) + 1
+            return after_h, after_w
+
+        def zoom(after_h, after_w, p):
+            assert (p.zoom_factor >= 1 and "p.zoom_factor should > 1")
+            after_h = after_h + math.floor((after_h - 1) * (p.zoom_factor - 1))
+            after_w = after_w + math.floor((after_w - 1) * (p.zoom_factor - 1))
+            return after_h, after_w
+
+        shrink_factor = 0
+        zoom_factor = 0
+        height = 0
+        width = 0
+
+        if hasattr(p, 'shrink_factor'):
+            if p.shrink_factor > 1:
+                shrink_factor = p.shrink_factor
+
+        if hasattr(p, 'zoom_factor'):
+            if p.zoom_factor > 1:
+                zoom_factor = p.zoom_factor
+        if hasattr(p, 'height'):
+            height = p.height
+        if hasattr(p, 'width'):
+            width = p.width
+
+        if shrink_factor and not zoom_factor:
+            after_h, after_w = shrink(after_h, after_w, p)
+        elif zoom_factor and not shrink_factor:
+            after_h, after_w = zoom(after_h, after_w, p)
+        elif height and width:
+            assert ((p.height > 0 and p.width > 0) and "height/width must > 0")
+            after_h = p.height
+            after_w = p.width
+        elif shrink_factor and zoom_factor:
+            after_h, after_w = shrink(after_h, after_w, p)
+            after_h, after_w = zoom(after_h, after_w, p)
+        else:
+            print("param is ", p)
+            assert (0 and "not support interp type")
+
+        output_shape[2] = after_h
+        output_shape[3] = after_w
+
+        param = {
+            'name': self.get_loc(layer.top[0]),
+            'height': p.height,
+            'pad_beg': p.pad_beg,
+            'pad_end': p.pad_end,
+            'shrink_factor': p.shrink_factor,
+            'width': p.width,
+            'zoom_factor': p.zoom_factor,
+            'scale_h': float(output_shape[2]) / input_shape[2],
+            'scale_w': float(output_shape[3]) / input_shape[3],
+            'coordinate_transformation_mode': 'align_corners',
+            'mode': 'linear',
+        }
+
+        new_op = self.mlir.create_interp_op([in_op], output_shape, **param)
+        self.addOperand(layer.top[0], new_op)
 
     def convert_lrn_op(self, layer):
         assert (self.layerType(layer) == 'LRN')
-        raise RuntimeError("not implemented")
+        in_op = self.getOperand(layer.bottom[0])
+        p = layer.lrn_param
+        param = {
+            'name': self.get_loc(layer.top[0]),
+            'alpha': p.alpha,
+            'beta': p.beta,
+            'bias': p.k,
+            'size': p.local_size,
+        }
+        output_shape = self.getShape(layer.top[0])
+        new_op = self.mlir.create_lrn_op([in_op], output_shape, **param)
+        self.addOperand(layer.top[0], new_op)
 
     def convert_lstm_op(self, layer):
         assert (self.layerType(layer) == 'LSTM')
-        raise RuntimeError("not implemented")
+        op = self.getOperand(layer.bottom[0])
+        input_shape = self.getShape(layer.bottom[0])
+        seq_length = input_shape[0]
+        batch_size = input_shape[1]
+        input_size = input_shape[2]
+        hidden_size = layer.recurrent_param.num_output
+        operands = list()
+        operands.append(op)
+        # weight
+        wname = layer.name + "_0"
+        weight = self.layer_dict[layer.name].blobs[0].data
+        weight = weight.reshape([4, hidden_size * input_size])
+        weight[[1, 2], :] = weight[[2, 1], :]  # ifoc =>iofc
+        weight = weight.reshape([1, 4 * hidden_size, input_size])
+        weight_op = self.create_weight_op(wname, weight)
+        operands.append(weight_op)
+        # recurrence
+        rname = layer.name + "_1"
+        r = self.layer_dict[layer.name].blobs[2].data
+        r = r.reshape([4, hidden_size * hidden_size])
+        r[[1, 2], :] = r[[2, 1], :]  # ifoc =>iofc
+        r = r.reshape([1, 4 * hidden_size, hidden_size])
+        recurrence_op = self.create_weight_op(rname, r)
+        operands.append(recurrence_op)
+        # bias
+        bname = layer.name + "_2"
+        bias = self.layer_dict[layer.name].blobs[1].data
+        bias = bias.reshape([4, hidden_size])
+        bias[[1, 2], :] = bias[[2, 1], :]  # ifoc =>iofc
+        bias = bias.reshape([1, 4 * hidden_size])
+        rbias = np.zeros_like(bias)
+        merge_bias = np.concatenate((bias, rbias), 1)
+        bias_op = self.create_weight_op(bname, merge_bias)
+        operands.append(bias_op)
+        operands.append(self.mlir.none_op)  # initial_h
+        operands.append(self.mlir.none_op)  # initial_c
+        name = self.get_loc(layer.top[0])
+        param = {
+            "name": [name + '_lstm', name + '_H', name + '_C'],
+            "hidden_size": hidden_size,
+            "bidirectional": bool(False),
+            "batch_first": bool(False),
+        }
+        out_shape = [seq_length, 1, batch_size, hidden_size]
+        out_shapes = [out_shape, [], []]
+        new_op, _, _ = self.mlir.create_lstm_op(operands, out_shapes, **param)
+        # reshape back
+        attrs = {'name': name}
+        output_shape = self.getShape(layer.top[0])
+        new_reshape_op = self.mlir.create_reshape_op([new_op], output_shape, **attrs)
+        self.addOperand(layer.top[0], new_reshape_op)
 
     def convert_lstm_jun_op(self, layer):
         assert (self.layerType(layer) == 'Lstm')
-        raise RuntimeError("not implemented")
+        op = self.getOperand(layer.bottom[0])
+        input_shape = self.getShape(layer.bottom[0])
+        seq_length = input_shape[0]
+        batch_size = input_shape[1]
+        input_size = input_shape[2]
+        hidden_size = layer.lstm_param.num_output
+        operands = list()
+        operands.append(op)
+        # weight
+        wname = layer.name + "_0"
+        weight = self.layer_dict[layer.name].blobs[0].data
+        weight = weight.reshape([4, hidden_size * input_size])
+        weight[[1, 2], :] = weight[[2, 1], :]  # ifoc =>iofc
+        weight = weight.reshape([1, 4 * hidden_size, input_size])
+        weight_op = self.create_weight_op(wname, weight)
+        operands.append(weight_op)
+        # recurrence
+        rname = layer.name + "_1"
+        r = self.layer_dict[layer.name].blobs[1].data
+        r = r.reshape([4, hidden_size * hidden_size])
+        r[[1, 2], :] = r[[2, 1], :]  # ifoc =>iofc
+        r = r.reshape([1, 4 * hidden_size, hidden_size])
+        recurrence_op = self.create_weight_op(rname, r)
+        operands.append(recurrence_op)
+        # bias
+        bname = layer.name + "_2"
+        bias = self.layer_dict[layer.name].blobs[2].data
+        bias = bias.reshape([4, hidden_size])
+        bias[[1, 2], :] = bias[[2, 1], :]  # ifoc =>iofc
+        bias = bias.reshape([1, 4 * hidden_size])
+        rbias = np.zeros_like(bias)
+        merge_bias = np.concatenate((bias, rbias), 1)
+        bias_op = self.create_weight_op(bname, merge_bias)
+        operands.append(bias_op)
+        operands.append(self.mlir.none_op)  # initial_h
+        operands.append(self.mlir.none_op)  # initial_c
+        name = self.get_loc(layer.top[0])
+        param = {
+            "name": [name + '_lstm', name + '_H', name + '_C'],
+            "hidden_size": hidden_size,
+            "bidirectional": bool(False),
+            "batch_first": bool(False),
+        }
+        out_shape = [seq_length, 1, batch_size, hidden_size]
+        out_shapes = [out_shape, [], []]
+        new_op, _, _ = self.mlir.create_lstm_op(operands, out_shapes, **param)
+        # reshape back
+        attrs = {'name': name}
+        output_shape = self.getShape(layer.top[0])
+        new_reshape_op = self.mlir.create_reshape_op([new_op], output_shape, **attrs)
+        self.addOperand(layer.top[0], new_reshape_op)
 
     def convert_matmul_op(self, layer):
         assert (self.layerType(layer) == 'MatMul')
@@ -587,11 +930,45 @@ class CaffeConverter(BaseConverter):
 
     def convert_normalize_op(self, layer):
         assert (self.layerType(layer) == 'Normalize')
-        raise RuntimeError("not implemented")
+        input_shape = self.getShape(layer.bottom[0])
+        in_op = self.getOperand(layer.bottom[0])
+        operands = list()
+        operands.append(in_op)
+        p = layer.norm_param
+        param = {
+            'name': self.get_loc(layer.top[0]),
+            'across_spatial': p.across_spatial,
+            'channel_shared': p.channel_shared,
+        }
+        assert (False == p.across_spatial)
+        assert (len(input_shape) > 1)
+        c = input_shape[1]
+        #scale
+        scale_shape = [1, c]
+        scale_name = layer.name + "_0"
+        blob = self.layer_dict[layer.name].blobs[0]
+        scale_data = np.array
+        if p.channel_shared:
+            assert (blob.count == 1)
+            value = blob.data.flatten()[0]
+            scale_data = np.array([[value for i in range(c)]], dtype=float)
+        else:
+            assert (blob.count == c)
+            scale_data = blob.data.reshape(scale_shape)
+        scale_op = self.create_weight_op(scale_name, scale_data)
+        operands.append(scale_op)
+        output_shape = self.getShape(layer.top[0])
+        new_op = self.mlir.create_normalize_op(operands, output_shape, **param)
+        self.addOperand(layer.top[0], new_op)
 
     def convert_mish_op(self, layer):
         assert (self.layerType(layer) == 'Mish')
-        raise RuntimeError("not implemented")
+        op = self.getOperand(layer.bottom[0])
+        input_shape = self.getShape(layer.bottom[0])
+        output_shape = input_shape
+        attrs = {'name': self.get_loc(layer.top[0])}
+        new_op = self.mlir.create_mish_op([op], output_shape, **attrs)
+        self.addOperand(layer.top[0], new_op)
 
     def convert_padding_op(self, layer):
         assert (self.layerType(layer) == 'Padding')
@@ -599,7 +976,19 @@ class CaffeConverter(BaseConverter):
 
     def convert_permute_op(self, layer):
         assert (self.layerType(layer) == 'Permute')
-        raise RuntimeError("not implemented")
+        in_op = self.getOperand(layer.bottom[0])
+        input_shape = self.getShape(layer.bottom[0])
+        operands = list()
+        for bottom in layer.bottom:
+            op = self.getOperand(bottom)
+            operands.append(op)
+        p = layer.permute_param
+        output_shape = list(input_shape)
+        for i in range(len(p.order)):
+            output_shape[i] = input_shape[p.order[i]]
+        attrs = {'order': p.order, 'name': self.get_loc(layer.top[0])}
+        new_op = self.mlir.create_permute_op([in_op], output_shape, **attrs)
+        self.addOperand(layer.top[0], new_op)
 
     def convert_power_op(self, layer):
         assert (self.layerType(layer) == 'Power')
@@ -607,15 +996,126 @@ class CaffeConverter(BaseConverter):
 
     def convert_prelu_op(self, layer):
         assert (self.layerType(layer) == 'PReLU')
-        raise RuntimeError("not implemented")
+        op = self.getOperand(layer.bottom[0])
+        input_shape = self.getShape(layer.bottom[0])
+        operands = list()
+        operands.append(op)
+        dim_len = len(input_shape)
+        assert (dim_len > 1)
+        slope_shape = [1] * dim_len
+        slope_shape[1] = input_shape[1]
+        # negative_slope
+        slope_op = self.blob_to_weight_op(layer, 0, slope_shape)
+        operands.append(slope_op)
+        param = {
+            'name': self.get_loc(layer.top[0]),
+        }
+        output_shape = input_shape
+        new_op = self.mlir.create_prelu_op(operands, output_shape, **param)
+        self.addOperand(layer.top[0], new_op)
 
     def convert_priorbox_op(self, layer):
         assert (self.layerType(layer) == 'PriorBox')
-        raise RuntimeError("not implemented")
+        op0 = self.getOperand(layer.bottom[0])
+        op1 = self.getOperand(layer.bottom[1])
+        input_shape0 = self.getShape(layer.bottom[0])
+        input_shape1 = self.getShape(layer.bottom[1])
+        operands = list()
+        operands.append(op0)
+        operands.append(op1)
+        assert (len(input_shape0) == 4)
+        h = input_shape0[2]
+        w = input_shape0[3]
+        p = layer.prior_box_param
+        min_size = [i for i in p.min_size]
+        max_size = [i for i in p.max_size]
+        aspect_ratio = [i for i in p.aspect_ratio]
+        variance = [i for i in p.variance]
+        assert (len(variance) == 4)
+
+        param = {
+            'min_size': min_size,
+            'max_size': max_size,
+            'variance': variance,
+            'clip': p.clip,
+            'offset': p.offset,
+            'name': self.get_loc(layer.top[0]),
+        }
+
+        if p.HasField('step_h') and p.HasField('step_w'):
+            param['step_h'] = p.step_h
+            param['step_w'] = p.step_w
+        elif p.HasField('step'):
+            param['step_h'] = p.step
+            param['step_w'] = p.step
+        else:
+            param['step_h'] = 0
+            param['step_w'] = 0
+
+        if p.HasField('img_h') and p.HasField('img_w'):
+            param['img_h'] = p.img_h
+            param['img_w'] = p.img_w
+        elif p.HasField('img_size'):
+            param['img_h'] = p.img_size
+            param['img_w'] = p.img_size
+        else:
+            param['img_h'] = 0
+            param['img_w'] = 0
+        aspect_ratios_ = list()
+        use_default_aspect_ratio = True
+        if p.HasField('use_default_aspect_ratio'):
+            use_default_aspect_ratio = p.use_default_aspect_ratio
+        if use_default_aspect_ratio:
+            aspect_ratios_.append(1.0)
+        for ar in aspect_ratio:
+            already_exist = False
+            for j in aspect_ratios_:
+                if math.fabs(ar - j) < 1e-6:
+                    already_exist = True
+                    break
+            if not already_exist:
+                aspect_ratios_.append(ar)
+                if p.flip:
+                    aspect_ratios_.append(1.0 / ar)
+        num_priors = len(aspect_ratios_) * len(min_size)
+        if len(max_size) > 0:
+            assert (len(max_size) == len(min_size))
+            num_priors += len(max_size)
+        param['num_priors'] = num_priors
+        param['aspect_ratios'] = aspect_ratios_
+        param['use_default_aspect_ratio'] = use_default_aspect_ratio
+        output_shape = [1, 2, int(h * w * num_priors * 4)]
+        new_op = self.mlir.create_priorbox_op(operands, output_shape, **param)
+        self.addOperand(layer.top[0], new_op)
 
     def convert_proposal_op(self, layer):
         assert (self.layerType(layer) == 'Proposal')
-        raise RuntimeError("not implemented")
+        input_shape = self.getShape(layer.bottom[0])
+        operands = list()
+        for bottom in layer.bottom:
+            in_op = self.getOperand(bottom)
+            operands.append(in_op)
+        p = layer.proposal_param
+        feat_stride = p.feat_stride
+        anchor_base_size = p.anchor_base_size
+        rpn_obj_threshold = p.rpn_obj_threshold
+        rpn_nms_threshold = p.rpn_nms_threshold
+        rpn_nms_post_top_n = p.rpn_nms_post_top_n
+        net_input_h = p.net_input_h
+        net_input_w = p.net_input_w
+        param = {
+            'name': self.get_loc(layer.top[0]),
+            'net_input_h': net_input_h,
+            'net_input_w': net_input_w,
+            'feat_stride': feat_stride,
+            'anchor_base_size': anchor_base_size,
+            'rpn_obj_threshold': rpn_obj_threshold,
+            'rpn_nms_threshold': rpn_nms_threshold,
+            'rpn_nms_post_top_n': rpn_nms_post_top_n
+        }
+        output_shape = [input_shape[0], 1, rpn_nms_post_top_n, 5]
+        new_op = self.mlir.create_proposal_op(operands, output_shape, **param)
+        self.addOperand(layer.top[0], new_op)
 
     def convert_relu6_op(self, layer):
         assert (self.layerType(layer) == 'ReLU6')
@@ -646,11 +1146,20 @@ class CaffeConverter(BaseConverter):
 
     def convert_reshape_op(self, layer):
         assert (self.layerType(layer) == 'Reshape')
-        raise RuntimeError("not implemented")
+        op = self.getOperand(layer.bottom[0])
+        attrs = {'name': self.get_loc(layer.top[0])}
+        output_shape = self.getShape(layer.top[0])
+        new_op = self.mlir.create_reshape_op([op], output_shape, **attrs)
+        self.addOperand(layer.top[0], new_op)
 
     def convert_reverse_op(self, layer):
         assert (self.layerType(layer) == 'Reverse')
-        raise RuntimeError("not implemented")
+        op = self.getOperand(layer.bottom[0])
+        axis = layer.reverse_param.axis
+        attrs = {'name': self.get_loc(layer.top[0]), 'axis': axis}
+        output_shape = self.getShape(layer.top[0])
+        new_op = self.mlir.create_reverse_op([op], output_shape, **attrs)
+        self.addOperand(layer.top[0], new_op)
 
     def convert_retinaface_detection_op(self, layer):
         assert (self.layerType(layer) == 'RetinaFaceDetection')
@@ -658,11 +1167,63 @@ class CaffeConverter(BaseConverter):
 
     def convert_roipooling_op(self, layer):
         assert (self.layerType(layer) == 'ROIPooling')
-        raise RuntimeError("not implemented")
+        operands = list()
+        assert (len(layer.bottom) == 2)
+        op0 = self.getOperand(layer.bottom[0])
+        op1 = self.getOperand(layer.bottom[1])
+        bottom0_shape = self.getShape(layer.bottom[0])
+        bottom1_shape = self.getShape(layer.bottom[1])
+        operands.append(op0)
+        operands.append(op1)
+        p = layer.roi_pooling_param
+        pooled_h = p.pooled_h
+        pooled_w = p.pooled_w
+        spatial_scale = p.spatial_scale
+        param = {
+            'name': self.get_loc(layer.top[0]),
+            'pooled_h': pooled_h,
+            'pooled_w': pooled_w,
+            'spatial_scale': spatial_scale
+        }
+        output_shape = [bottom1_shape[0] * bottom1_shape[2], bottom0_shape[1], pooled_h, pooled_w]
+        new_op = self.mlir.create_roipooling_op(operands, output_shape, **param)
+        self.addOperand(layer.top[0], new_op)
+
+    def convert_frcn_detection_op(self, layer):
+        assert (self.layerType(layer) == 'FrcnDetection')
+        input_shape = self.getShape(layer.bottom[2])
+        operands = list()
+        for bottom in layer.bottom:
+            op = self.getOperand(bottom)
+            operands.append(op)
+        p = layer.frcn_detection_param
+        class_num = p.class_num
+        obj_threshold = p.obj_threshold
+        nms_threshold = p.nms_threshold
+        keep_topk = p.keep_topk
+        param = {
+            'name': self.get_loc(layer.top[0]),
+            'class_num': class_num,
+            'obj_threshold': obj_threshold,
+            'nms_threshold': nms_threshold,
+            'keep_topk': keep_topk
+        }
+
+        output_shape = [input_shape[0], 1, keep_topk, 6]
+        new_op = self.mlir.create_frcn_detection_op(operands, output_shape, **param)
+        self.addOperand(layer.top[0], new_op)
 
     def convert_shufflechannel_op(self, layer):
         assert (self.layerType(layer) == 'ShuffleChannel')
-        raise RuntimeError("not implemented")
+        in_op = self.getOperand(layer.bottom[0])
+        input_shape = self.getShape(layer.bottom[0])
+        group = layer.shuffle_channel_param.group
+        operands = list()
+        operands.append(in_op)
+        output_shape = input_shape
+        attrs = {'name': self.get_loc(layer.top[0]), 'group': group}
+        new_op = self.mlir.create_shuffle_channel_op(operands, output_shape, **attrs)
+        self.addOperand(layer.top[0], new_op)
 
     def convert_sigmoid_op(self, layer):
         assert (self.layerType(layer) == 'Sigmoid')
@@ -675,7 +1236,46 @@ class CaffeConverter(BaseConverter):
 
     def convert_slice_op(self, layer):
         assert (self.layerType(layer) == 'Slice')
-        raise RuntimeError("not implemented")
+        op = self.getOperand(layer.bottom[0])
+        input_shape = self.getShape(layer.bottom[0])
+        operands = list()
+        operands.append(op)
+        assert (len(input_shape) == 4)
+        p = layer.slice_param
+        axis = p.axis
+        bottom_slice_axis = input_shape[axis]
+        top_size = len(layer.top)
+        slice_num = len(p.slice_point)
+        slices = list()
+        if slice_num > 0:
+            assert (slice_num == top_size - 1)
+            assert (top_size <= bottom_slice_axis)
+            prev = 0
+            for i in range(slice_num):
+                assert (p.slice_point[i] > prev)
+                slices.append(p.slice_point[i] - prev)
+                prev = p.slice_point[i]
+            slices.append(bottom_slice_axis - prev)
+        else:
+            assert (bottom_slice_axis % top_size == 0)
+            for i in range(top_size):
+                slices.append(int(bottom_slice_axis / top_size))
+        offset = 0
+        for i in range(top_size):
+            output_shape = list(input_shape)
+            output_shape[axis] = slices[i]
+            crop_offset = [0] * len(input_shape)
+            crop_offset[axis] = offset
+            steps = [1] * len(input_shape)
+            param = {
+                'name': self.get_loc(layer.top[i]),
+                'offset': crop_offset,
+                'steps': steps,
+            }
+            new_op = self.mlir.create_slice_op(operands, output_shape, **param)
+            self.addOperand(layer.top[i], new_op)
+            offset += slices[i]
+        #raise RuntimeError("not implemented")
 
     def convert_split_op(self, layer):
         assert (self.layerType(layer) == 'Split')
@@ -713,4 +1313,36 @@ class CaffeConverter(BaseConverter):
 
     def convert_yolo_detection_op(self, layer):
         assert (self.layerType(layer) == 'YoloDetection')
-        raise RuntimeError("not implemented")
+        in_op = self.getOperand(layer.bottom[0])
+        input_shape = self.getShape(layer.bottom[0])
+
+        operands = list()
+        for bottom in layer.bottom:
+            op = self.getOperand(bottom)
+            operands.append(op)
+        p = layer.yolo_detection_param
+
+        if not p.anchors:
+            if p.tiny:
+                p.anchors = "10,14,23,27,37,58,81,82,135,169,344,319"
+            elif p.yolo_v4:
+                p.anchors = "142,110,192,243,459,401,36,75,76,55,72,146,12,16,19,36,40,28"
+            else:
+                p.anchors = "10,13,16,30,33,23,30,61,62,45,59,119,116,90,156,198,373,326"
+
+        param = {
+            'name': self.get_loc(layer.top[0]),
+            'net_input_h': p.net_input_h,
+            "net_input_w": p.net_input_w,
+            "nms_threshold": p.nms_threshold,
+            "obj_threshold": p.obj_threshold,
+            "keep_topk": p.keep_topk,
+            "spp_net": p.spp_net,
+            "tiny": p.tiny,
+            "yolo_v4": p.yolo_v4,
+            "class_num": p.class_num,
+            "anchors": p.anchors
+        }
+        output_shape = [input_shape[0], 1, p.keep_topk, 6]
+        new_op = self.mlir.create_yolo_detection_op(operands, output_shape, **param)
+        self.addOperand(layer.top[0], new_op)

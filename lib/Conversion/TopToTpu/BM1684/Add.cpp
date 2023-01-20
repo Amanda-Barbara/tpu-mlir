@@ -19,11 +19,11 @@ void AddLowering::LoweringINT8(PatternRewriter &rewriter, top::AddOp op,
   std::vector<int64_t> rshift_v(nInputs);
   std::vector<int64_t> multiplier_v(nInputs, 1);
   std::vector<double> coeff_v(nInputs, 1.0);
-  auto th_output = Quant::getThreshold(op.output());
+  auto th_output = module::getThreshold(op.getOutput());
 
-  if (op.coeff().has_value()) {
+  if (op.getCoeff().has_value()) {
     int idx = 0;
-    for (auto v : op.coeff().value()) {
+    for (auto v : op.getCoeff().value()) {
       coeff_v[idx++] = v.cast<FloatAttr>().getValueAsDouble();
     }
   }
@@ -31,9 +31,9 @@ void AddLowering::LoweringINT8(PatternRewriter &rewriter, top::AddOp op,
   for (int i = 0; i < nInputs; i++) {
     auto input = op->getOperand(i);
     operands.push_back(input);
-    auto th_input = Quant::getThreshold(input);
+    auto th_input = module::getThreshold(input);
     rshift_v[i] = calRightShiftNumUseCblas(coeff_v[i], th_input, th_output,
-                                           Quant::BITS_INT8);
+                                           BITS_INT8);
     float scale = 1.0 * (1 << rshift_v[i]) * th_input / th_output;
     int8_t multiplier_int8 = 0;
     float coeff = coeff_v[i];
@@ -41,12 +41,12 @@ void AddLowering::LoweringINT8(PatternRewriter &rewriter, top::AddOp op,
     multiplier_v[i] = (double)multiplier_int8;
   }
   std::vector<NamedAttribute> attrs;
-  attrs.push_back(rewriter.getNamedAttr("do_relu", op.do_reluAttr()));
+  attrs.push_back(rewriter.getNamedAttr("do_relu", op.getDoReluAttr()));
   attrs.push_back(rewriter.getNamedAttr(
       "multipliers", rewriter.getI64ArrayAttr(multiplier_v)));
   attrs.push_back(
       rewriter.getNamedAttr("rshifts", rewriter.getI64ArrayAttr(rshift_v)));
-  auto newType = Quant::getQuantInt8Type(op.output());
+  auto newType = getQuantInt8Type(op.getOutput());
   rewriter.replaceOpWithNewOp<tpu::AddOp>(op, newType, operands, attrs);
 }
 

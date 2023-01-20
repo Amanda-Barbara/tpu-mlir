@@ -9,9 +9,7 @@
 
 #include "tpu_mlir/Dialect/Tpu/IR/TpuOps.h"
 #include "tpu_mlir/Dialect/Tpu/Transforms/Passes.h"
-#include "tpu_mlir/Support/Helper/Module.h"
-
-#include "mlir/Dialect/Quant/QuantTypes.h"
+#include "tpu_mlir/Support/Module.h"
 #include "mlir/IR/BlockAndValueMapping.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "tpu_mlir/Dialect/Tpu/Transforms/LayerGroup/GroupOps.h"
@@ -24,7 +22,7 @@
 
 using namespace llvm;
 using namespace mlir;
-using namespace tpu_mlir::helper;
+
 namespace tpu_mlir {
 namespace tpu {
 
@@ -45,10 +43,10 @@ struct OpReorderPattern : public RewritePattern {
         continue;
       }
       if (isa<top::WeightOp>(op_)) {
-        if (op_->hasOneUse() == false) {
-          op_->dump();
-          llvm_unreachable("weightOp should only has one use");
-        }
+        // if (op_->hasOneUse() == false) {
+        //   op_->dump();
+        //   llvm_unreachable("weightOp should only has one use");
+        // }
         weights.push_back(op_);
       } else {
         if (op_->hasOneUse() == true) {
@@ -78,15 +76,16 @@ public:
   LayerGroupPass() {}
   void runOnOperation() override {
     auto func = getOperation();
-    if (func.getName() == "main") {
+    if (func.getName() == "main" || module::getFuncMode(func) != "TPU") {
       return;
     }
+    int64_t opt = this->opt;
     auto ctx = func.getContext();
     RewritePatternSet patterns(ctx);
     patterns.add<OpReorderPattern>(ctx);
     applyPatternsAndFoldGreedily(func, std::move(patterns));
     GroupOps gOps(func);
-    gOps.process();
+    gOps.process(opt);
   }
 };
 

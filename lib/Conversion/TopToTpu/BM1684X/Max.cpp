@@ -15,7 +15,10 @@ namespace bm1684x {
 void MaxLowering::LoweringF32(PatternRewriter &rewriter, top::MaxOp op) const {
   lowering_common_f32<tpu::MaxOp>(rewriter, op);
 }
-
+void MaxLowering::LoweringINT4(PatternRewriter &rewriter, top::MaxOp op,
+                                   bool asymmetric) const {
+  LoweringINT8(rewriter, op, asymmetric);
+}
 void MaxLowering::LoweringINT8(PatternRewriter &rewriter, top::MaxOp op,
                                bool asymmetric) const {
   lowering_common_int8<tpu::MaxOp>(rewriter, op, asymmetric);
@@ -31,7 +34,7 @@ void MaxLowering::LoweringF16(PatternRewriter &rewriter, top::MaxOp op) const {
 
 void MaxLowering::LoweringQuantized(PatternRewriter &rewriter,
                                     top::MaxOp op) const {
-  lowering_common<tpu::MaxOp>(rewriter, op, op.output().getType());
+  lowering_common<tpu::MaxOp>(rewriter, op, op.getOutput().getType());
 }
 
 } // namespace bm1684x

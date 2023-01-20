@@ -10,13 +10,10 @@
 #include "tpu_mlir/Dialect/Top/IR/TopOps.h"
 #include "tpu_mlir/Support/Dnnl/Dnnl.h"
 #include "tpu_mlir/Support/Float16.h"
-#include "tpu_mlir/Support/Helper/Module.h"
-#include "tpu_mlir/Support/Helper/Quant.h"
+#include "tpu_mlir/Support/Module.h"
+#include "tpu_mlir/Support/MathUtils.h"
 
-using namespace tpu_mlir;
-using namespace tpu_mlir::helper;
 using namespace tpu_mlir::top;
-using namespace mlir;
 
 template <typename T>
 LogicalResult WeightOp::update(const std::vector<T> &data, size_t count) {
@@ -24,12 +21,11 @@ LogicalResult WeightOp::update(const std::vector<T> &data, size_t count) {
   auto dialect = op->getDialect();
   auto topDialect = llvm::cast<TopDialect>(dialect);
   if (topDialect->wFile == nullptr) {
-    auto moduleOp = Module::getModuleOp(op);
-    auto weight_file = Module::getWeightFile(moduleOp);
+    auto weight_file = module::getWeightFile();
     topDialect->loadWeightFile(weight_file);
   }
-  return topDialect->wFile->updateTensorData(Module::getName(op).str(), &data[0],
-                                             count);
+  return topDialect->wFile->updateTensorData(module::getName(op).str(),
+                                             &data[0], count);
 }
 
 template <typename T> std::shared_ptr<std::vector<T>> WeightOp::read() {
@@ -37,16 +33,15 @@ template <typename T> std::shared_ptr<std::vector<T>> WeightOp::read() {
   auto dialect = op->getDialect();
   auto topDialect = llvm::cast<TopDialect>(dialect);
   if (topDialect->wFile == nullptr) {
-    auto moduleOp = Module::getModuleOp(op);
-    auto weight_file = Module::getWeightFile(moduleOp);
+    auto weight_file = module::getWeightFile();
     topDialect->loadWeightFile(weight_file);
   }
-  auto type = output().getType().cast<RankedTensorType>();
-  return topDialect->wFile->readTensor<T>(Module::getName(op).str(), type);
+  auto type = getOutput().getType().cast<RankedTensorType>();
+  return topDialect->wFile->readTensor<T>(module::getName(op).str(), type);
 }
 
 std::shared_ptr<std::vector<float>> WeightOp::read_as_float() {
-  auto dtype = Module::getStorageType(output());
+  auto dtype = module::getStorageType(getOutput());
   if (dtype.isUnsignedInteger(8)) {
     auto data_u8 = read<uint8_t>();
     return std::make_shared<std::vector<float>>(data_u8->begin(),
@@ -93,8 +88,7 @@ std::shared_ptr<std::vector<float>> WeightOp::read_as_float() {
   return nullptr;
 }
 std::shared_ptr<std::vector<uint8_t>> WeightOp::read_as_byte() {
-  auto type = getType().cast<RankedTensorType>();
-  auto dtype = type.getElementType();
+  auto dtype = module::getStorageType(getOutput());
   if (dtype.isInteger(8)) {
     return read<uint8_t>();
   } else if (dtype.isF32()) {
@@ -115,7 +109,7 @@ std::shared_ptr<std::vector<uint8_t>> WeightOp::read_as_byte() {
     auto data_u8 = std::make_shared<std::vector<uint8_t>>(bytes);
     memcpy(data_u8->data(), data_i32->data(), bytes);
     return std::move(data_u8);
-  } else if (dtype.isa<::mlir::Float16Type, ::mlir::BFloat16Type>()) {
+  } else if (dtype.isa<Float16Type, BFloat16Type>()) {
     auto data_u16 = read<uint16_t>();
     auto bytes = data_u16->size() * sizeof(uint16_t);
     auto data_u8 = std::make_shared<std::vector<uint8_t>>(bytes);
@@ -136,21 +130,30 @@ Value WeightOp::create(Operation *OwnerOp, llvm::StringRef suffix,
   auto dialect = ctx->getLoadedDialect("top");
   auto topDialect = llvm::cast<TopDialect>(dialect);
   if (topDialect->wFile == nullptr) {
-    auto moduleOp = Module::getModuleOp(OwnerOp);
-    auto weight_file = Module::getWeightFile(moduleOp);
+    auto weight_file = module::getWeightFile();
     topDialect->loadWeightFile(weight_file);
   }
-  std::string op_name = Module::getName(OwnerOp).str();
+  std::string op_name = module::getName(OwnerOp).str();
   std::string new_name = op_name + "_" + suffix.str();
+  std::set<StringRef> all_tensor_names;
+  topDialect->wFile->getAllNames(all_tensor_names);
+  auto it = all_tensor_names.find(new_name.c_str());
+  int index = 1;
+  while (it != all_tensor_names.end()) {
+    new_name = op_name + "_" + std::to_string((index++)) + "_" + suffix.str();
+    it = all_tensor_names.find(new_name.c_str());
+  }
+
   auto ret = topDialect->wFile->addTensor(new_name, &data, type);
   assert(succeeded(ret));
   auto nameAttr = builder.getStringAttr(new_name);
-  std::vector<mlir::Attribute> attrElements;
-  auto nulldataAttr = builder.getArrayAttr(attrElements);
-  auto newOp = builder.create<top::WeightOp>(NameLoc::get(nameAttr), type, nulldataAttr);
+  auto newOp =
+      builder.create<top::WeightOp>(NameLoc::get(nameAttr), type, ValueRange{});
   return newOp.getResult();
 }
 template LogicalResult WeightOp::update(const std::vector<uint8_t> &data,
+                                        size_t cont);
+template LogicalResult WeightOp::update(const std::vector<uint16_t> &data,
                                         size_t cont);
 template LogicalResult WeightOp::update(const std::vector<uint32_t> &data,
                                         size_t cont);
@@ -159,7 +162,7 @@ template std::shared_ptr<std::vector<int8_t>> WeightOp::read();
 template std::shared_ptr<std::vector<int16_t>> WeightOp::read();
 template std::shared_ptr<std::vector<uint16_t>> WeightOp::read();
 template std::shared_ptr<std::vector<uint8_t>> WeightOp::read();
-template std::shared_ptr<std::vector<int32_t>> WeightOp::read();
+template i32_array_t WeightOp::read();
 template Value WeightOp::create(Operation *OwnerOp, llvm::StringRef name,
                                 const std::vector<float> &data,
                                 RankedTensorType &type);
@@ -182,18 +185,17 @@ template Value WeightOp::create(Operation *OwnerOp, llvm::StringRef name,
                                 const std::vector<uint32_t> &data,
                                 RankedTensorType &type);
 
-mlir::Value WeightOp::clone_bf16(Operation *OwnerOp) {
+Value WeightOp::clone_bf16(Operation *OwnerOp) {
   auto type = getType().cast<RankedTensorType>();
   auto dtype = type.getElementType();
   assert(dtype.isF32());
   auto data = read<float>();
   auto count = data->size();
   auto data_bf16 = std::make_shared<std::vector<uint16_t>>(count);
-  auto is_cv18xx = Module::isCV18xx(Module::getChip(OwnerOp));
 
 #pragma omp parallel for schedule(static, omp_schedule(count))
   for (uint32_t i = 0; i < count; i++) {
-    data_bf16->at(i) = f32_to_bf16(data->at(i), is_cv18xx, true);
+    data_bf16->at(i) = f32_to_bf16(data->at(i));
   }
   auto ctx = OwnerOp->getContext();
   OpBuilder builder(ctx);
@@ -201,20 +203,20 @@ mlir::Value WeightOp::clone_bf16(Operation *OwnerOp) {
   auto dialect = ctx->getLoadedDialect("top");
   auto topDialect = llvm::cast<TopDialect>(dialect);
   assert(topDialect->wFile != nullptr);
-  std::string new_name = Module::getName(getOperation()).str() + "_bf16";
+  // if the weightop will be used by 2 ops, it need to create a new WeightOp
+  std::string new_name = module::getName(OwnerOp).str() +
+                         module::getName(getOperation()).str() + "_bf16";
   auto new_type = RankedTensorType::get(type.getShape(), builder.getBF16Type());
   auto ret =
       topDialect->wFile->addTensor(new_name, data_bf16->data(), new_type);
   assert(succeeded(ret));
   auto nameAttr = builder.getStringAttr(new_name);
-  std::vector<mlir::Attribute> attrElements;
-  auto nulldataAttr = builder.getArrayAttr(attrElements);
-  auto newOp =
-      builder.create<top::WeightOp>(NameLoc::get(nameAttr), new_type, nulldataAttr);
+  auto newOp = builder.create<top::WeightOp>(NameLoc::get(nameAttr), new_type,
+                                             ValueRange{});
   return newOp.getResult();
 };
 
-mlir::Value WeightOp::clone_f16(Operation *OwnerOp) {
+Value WeightOp::clone_f16(Operation *OwnerOp) {
   auto type = getType().cast<RankedTensorType>();
   auto dtype = type.getElementType();
   assert(dtype.isF32());
@@ -232,14 +234,14 @@ mlir::Value WeightOp::clone_f16(Operation *OwnerOp) {
   auto dialect = ctx->getLoadedDialect("top");
   auto topDialect = llvm::cast<TopDialect>(dialect);
   assert(topDialect->wFile != nullptr);
-
-  std::string new_name = Module::getName(getOperation()).str() + "_f16";
+  // if the weightop will be used by 2 ops, it need to create a new WeightOp
+  std::string new_name = module::getName(OwnerOp).str() +
+                         module::getName(getOperation()).str() + "_f16";
   auto new_type = RankedTensorType::get(type.getShape(), builder.getF16Type());
   auto ret = topDialect->wFile->addTensor(new_name, data_f16->data(), new_type);
   assert(succeeded(ret));
   auto nameAttr = builder.getStringAttr(new_name);
-  std::vector<mlir::Attribute> attrElements;
-  auto nulldataAttr = builder.getArrayAttr(attrElements);
-  auto newOp = builder.create<top::WeightOp>(NameLoc::get(nameAttr), new_type, nulldataAttr);
+  auto newOp = builder.create<top::WeightOp>(NameLoc::get(nameAttr), new_type,
+                                             ValueRange{});
   return newOp.getResult();
 };

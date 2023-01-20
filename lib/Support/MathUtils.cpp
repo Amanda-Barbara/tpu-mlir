@@ -12,9 +12,10 @@
 #include "mlir/IR/PatternMatch.h"
 #include "omp.h"
 #include "tpu_mlir/Support/Dnnl/Dnnl.h"
-#include "tpu_mlir/Support/Helper/Quant.h"
+
 #include "llvm/Support/Debug.h"
 #include <map>
+#include <numeric>
 
 #define DEBUG_TYPE "math_utils"
 namespace tpu_mlir {
@@ -23,8 +24,8 @@ void get_scale_and_shift(float scale_f, int &scale, int &shift, int bitwidth) {
   float min_err = FLT_MAX;
   int m_limit = (bitwidth == 32) ? INT_MAX : CHAR_MAX;
   for (int n = -32; n < 31; n++) {
-    //若scale_f大于等于1，这里循环上限要设为31(而不是32)，且越大则需减少越多，暂只考虑scale_f小于等于1的情形
-    // wxc 20220119
+    // 若scale_f大于等于1，这里循环上限要设为31(而不是32)，且越大则需减少越多，暂只考虑scale_f小于等于1的情形
+    //  wxc 20220119
     int m = (int)std::round(scale_f * std::pow(2, n));
     float err = std::abs(m / std::pow(2, n) - scale_f);
     if (err < min_err && abs(m) < m_limit) {
@@ -164,14 +165,13 @@ float func_log2(double dataInput) {
   return result;
 }
 
-void quantizeToInt32(const float *pSrc, int32_t *pDst, int len, double scale) {
+void quantizeToInt32(const float *pSrc, int32_t *pDst, int len, float scale) {
   // used in CV18xx bias quant
   int32_t qmax = INT_MAX;
   int32_t qmin = INT_MIN;
-  int tmp = 0;
+  int64_t tmp = 0;
   for (int i = 0; i < len; i++) {
-    tmp = helper::Quant::to_int(pSrc[i] * scale, ROUNDING_HALF_TO_EVEN);
-    ;
+    tmp = to_int(pSrc[i] * scale, ROUNDING_HALF_TO_EVEN);
     pDst[i] = (int32_t)((tmp > qmax) ? qmax : ((tmp < qmin) ? qmin : tmp));
   }
 }
@@ -218,12 +218,18 @@ float quantizeToInt15(const float *pSrc, int16_t *pDst, int len, float scale,
   return ratio;
 }
 
-void quantizeToInt8(const float *pSrc, int8_t *pDst, int len, double scale,
+template <typename T>
+void quantizeToInt8(const float *pSrc, T *pDst, int len, float scale,
                     RoundingMode round_mode) {
   for (int i = 0; i < len; i++) {
-    pDst[i] = helper::Quant::to_int8(pSrc[i] * scale, round_mode);
+    pDst[i] = to_int8(pSrc[i] * scale, round_mode);
   }
 }
+
+template void quantizeToInt8(const float *pSrc, int8_t *pDst, int len,
+                             float scale, RoundingMode round_mode);
+template void quantizeToInt8(const float *pSrc, float *pDst, int len,
+                             float scale, RoundingMode round_mode);
 
 // tensorflow/lite/kernels/internal/quantization_util.cc
 // mlir/lib/Dialect/Tosa/Utils/QuantUtils.cpp
@@ -272,8 +278,8 @@ void QuantizeMultiplier(double double_multiplier, int64_t *quantized_multiplier,
 }
 
 // CV18xx
-double getQscaleForFilter(float max_filter, float threshold_y, float threshold_x,
-                         int quant_bitwidth) {
+double getQscaleForFilter(float max_filter, float threshold_y,
+                          float threshold_x, int quant_bitwidth) {
   /// get a QScale for Filter (with multiplier)
   ///   Q(W) = W * (threshold_x / threshold_y) * (1 / QScale)
   ///   find a QScale so that Q(max_filter) = 127
@@ -308,7 +314,7 @@ double getQscaleForBias(float max_bias, float threshold_y) {
                  << threshold_y << "\n";
     threshold_y = 0.00001;
   }
-  double qscale = (max_bias * 127.0f) / (0x7fffffff * threshold_y);
+  double qscale = (max_bias * 127.0f) / (0x7fffffff * 0.998 * threshold_y);
   return qscale;
 }
 
@@ -379,6 +385,13 @@ int8_t getMultiplierI8FromQScaleAndRShift(double qscale, int8_t rshift) {
   return (uint32_t)(qscale * (1 << rshift));
 }
 
+int8_t quantizeFilterRShift(float w, float threshold_y, float threshold_x,
+                            uint32_t rshift) {
+  double factor = (threshold_x / threshold_y) * (1 << rshift);
+  float q_f = (float)(w * factor);
+  return to_int8(q_f, ROUNDING_HALF_UP);
+}
+
 void quantizeFilterRShiftAndMultiplier(const float *pSrc, int8_t *pDst, int len,
                                        float threshold_y, float threshold_x,
                                        int64_t rshift, int64_t multiplier,
@@ -419,6 +432,9 @@ T RightShiftRound(T src, int shift_num, RoundingMode round_mode) {
   if (shift_num > 63)
     shift_num = 63;
   T val, res;
+  if (shift_num < 0) {
+    return src << (-shift_num);
+  }
   val = src >> shift_num;
   res = val;
   T lo_mask = (1ull << shift_num) - 1;
@@ -484,8 +500,8 @@ int64_t applyMultiplierAndRShift(int64_t v, int64_t multiplier, int64_t rshift,
     return MultiplyByQuantizedMultiplier((int32_t)v, (int32_t)multiplier,
                                          (int32_t)rshift);
   } else if (m_type == CVI_QUANT) {
-    return helper::Quant::to_int(((((float)v * multiplier)) / (1 << rshift)),
-                                 ROUNDING_HALF_UP);
+    return to_int(((((float)v * multiplier)) / (1 << rshift)),
+                  ROUNDING_HALF_UP);
   } else {
     llvm_unreachable("unsupport quant multiplier type.");
   }
@@ -542,9 +558,9 @@ void pad_tensor_for_deconv(float *p_after_pad, float *src, int n, int c, int d,
                            int pht, int phb, int pwl, int pwr,
                            float pad_value) {
   int nc = n * c;
-  int od = (d - 1) * sd + 1 + dd * (kd - 1);
-  int oh = (h - 1) * sh + 1 + dh * (kh - 1);
-  int ow = (w - 1) * sw + 1 + dw * (kw - 1);
+  int od = (d - 1) * sd + 1 + dd * (2 * kd - 2 - pdf - pdb);
+  int oh = (h - 1) * sh + 1 + dh * (2 * kh - 2 - pht - phb);
+  int ow = (w - 1) * sw + 1 + dw * (2 * kw - 2 - pwl - pwr);
   int pst[3] = {(kd - 1) * dd - pdf, (kh - 1) * dh - pht, (kw - 1) * dw - pwl};
   int ped[3] = {(kd - 1) * dd - pdb, (kh - 1) * dh - phb, (kw - 1) * dw - pwr};
   for (int i = 0; i < nc; i++) {
@@ -577,6 +593,60 @@ void tensor_sub_zp(float *tensor_after_zp, float *src, int64_t length,
   }
 }
 
+void tensor_hw_transpose(float *dst, float *src, int64_t N, int64_t C,
+                         int64_t H, int64_t W) {
+#pragma omp parallel for schedule(static, omp_schedule(N *C))
+  for (int64_t nc = 0; nc < N * C; ++nc) {
+    int64_t nc_offset = nc * H * W;
+    for (int w = 0; w < W; ++w) {
+      for (int h = 0; h < H; ++h) {
+        int64_t d_offset = nc_offset + w * H + h;
+        int64_t s_offset = nc_offset + h * W + w;
+        dst[d_offset] = src[s_offset];
+      }
+    }
+  }
+}
+
+void tensor_split(float *src_data, std::vector<std::vector<float>> &dst_data,
+                  std::vector<int64_t> &shape, int slice_num, int axis) {
+  assert(shape[axis] % slice_num == 0);
+  assert(axis < shape.size());
+  dst_data.resize(slice_num);
+
+  // The data can be treated as 3 dim
+  // 1.pre of the axis
+  // 2.the axis
+  // 3.behind of axis
+  std::vector<int64_t> fake_shape(3);
+  fake_shape[0] = std::accumulate(shape.begin(), shape.begin() + axis, 1,
+                                  std::multiplies<int64_t>());
+  fake_shape[1] = shape[axis];
+  fake_shape[2] = std::accumulate(shape.begin() + axis + 1, shape.end(), 1,
+                                  std::multiplies<int64_t>());
+  std::vector<int64_t> fake_offset(3);
+  fake_offset[2] = 1;
+  fake_offset[1] = fake_offset[2] * fake_shape[2];
+  fake_offset[0] = fake_offset[1] * fake_shape[1];
+
+  int64_t indices = shape[1] / slice_num;
+  int64_t slice_size = fake_shape[0] * indices * fake_offset[1];
+
+  // each slice
+#pragma omp parallel for schedule(static, omp_schedule(slice_num))
+  for (int64_t i = 0; i < slice_num; ++i) {
+    dst_data[i].resize(slice_size);
+    // each fake dim 0
+#pragma omp parallel for schedule(static, omp_schedule(fake_shape[0]))
+    for (int64_t j = 0; j < fake_shape[0]; ++j) {
+      float *src_ptr =
+          src_data + j * fake_offset[0] + i * indices * fake_offset[1];
+      float *dst_ptr = dst_data[i].data() + j * indices * fake_offset[1];
+      std::copy(src_ptr, src_ptr + indices * fake_offset[1], dst_ptr);
+    }
+  }
+}
+
 int omp_schedule(int count) {
   return (count + omp_get_num_threads() - 1) / omp_get_num_threads();
 }
@@ -591,9 +661,9 @@ void function_relu(float *src, float *dst, int64_t size, float relu_limit,
     }
     if (elem_type) {
       if (elem_type.isUnsignedInteger(8)) {
-        dst[i] = helper::Quant::to_uint8(dst[i]);
+        dst[i] = to_uint8(dst[i]);
       } else if (elem_type.isInteger(8)) {
-        dst[i] = helper::Quant::to_int8(dst[i]);
+        dst[i] = to_int8(dst[i]);
       }
     }
   }
@@ -699,6 +769,230 @@ int dnnl_mm(float *input, float *weight, float *bias, float *output, int m,
 #endif // DUMP_FLAG
 
   return 0;
+}
+
+void stride_slice_gen_params(const int64_t *input_shape_, int input_dim_,
+                             const float *begin_index_, const float *end_index_,
+                             const float *strides_, int strides_size,
+                             int begin_mask_, int end_mask_, int ellipsis_mask_,
+                             int new_axis_mask_, int shrink_axis_mask_,
+                             int *input_shape, int *input_dim, int *begin_index,
+                             int *end_index, int *strides, int *begin_mask,
+                             int *end_mask, int *shrink_axis_mask) {
+  int sdim = strides_size;
+  bool ellipsis_seen = false;
+  int num_add_axis_after_ellipsis = 0;
+  for (int i = 0; i < sdim; ++i) {
+    if (ellipsis_seen && ((1 << i) & new_axis_mask_) != 0x0)
+      ++num_add_axis_after_ellipsis;
+    if (((1 << i) & ellipsis_mask_) != 0x0)
+      ellipsis_seen = true;
+  }
+  if (!ellipsis_seen) {
+    ellipsis_mask_ |= (1 << sdim);
+    ++sdim;
+  }
+  int ddim = input_dim_;
+  *begin_mask = 0x0;
+  *end_mask = 0x0;
+  *shrink_axis_mask = 0x0;
+  int fidx = 0;
+  int iidx = 0;
+  int tidx = 0;
+  for (int i = 0; i < sdim; ++i) {
+    if ((1 << i) & ellipsis_mask_) {
+      int nidx =
+          std::min(ddim - (sdim - i) + 1 + num_add_axis_after_ellipsis, ddim);
+      for (; tidx < nidx; ++tidx, ++fidx) {
+        begin_index[fidx] = 0;
+        end_index[fidx] = 0;
+        strides[fidx] = 1;
+        input_shape[fidx] = input_shape_[iidx++];
+        *begin_mask |= (1 << fidx);
+        *end_mask |= (1 << fidx);
+      }
+    } else if ((1 << i) & new_axis_mask_) {
+      begin_index[fidx] = 0;
+      end_index[fidx] = 0;
+      strides[fidx] = 1;
+      input_shape[fidx] = 1;
+      *begin_mask |= (1 << fidx);
+      *end_mask |= (1 << fidx);
+      ++fidx;
+    } else {
+      begin_index[fidx] = begin_index_[i];
+      end_index[fidx] = end_index_[i];
+      strides[fidx] = strides_[i];
+      input_shape[fidx] = input_shape_[iidx++];
+      if (begin_mask_ & (1 << i))
+        *begin_mask |= (1 << fidx);
+      if (end_mask_ & (1 << i))
+        *end_mask |= (1 << fidx);
+      if (shrink_axis_mask_ & (1 << i)) {
+        *shrink_axis_mask |= (1 << fidx);
+      }
+      ++fidx;
+      ++tidx;
+    }
+  }
+  *input_dim = fidx;
+}
+
+inline int Clamp(int value, int min, int max) {
+  value = value >= min ? value : min;
+  value = value <= max ? value : max;
+  return value;
+}
+
+int StartForAxis(const int *start_indices, const int *strides, const int mask,
+                 const int *shape, const int axis) {
+  const int axis_size = shape[axis];
+  if (axis_size == 0) {
+    return 0;
+  }
+  int start = start_indices[axis];
+
+  if (mask & 1 << axis) {
+    start = strides[axis] > 0 ? 0 : axis_size;
+  }
+  start = (start < 0) ? start + axis_size : start;
+
+  if (strides[axis] > 0) {
+    start = Clamp(start, 0, axis_size);
+  } else {
+    start = Clamp(start, -1, axis_size - 1);
+  }
+  return start;
+}
+
+int StopForAxis(const int *stop_indices, const int *strides, const int mask,
+                const int shrink_mask, const int *shape, const int axis,
+                int start_for_axis) {
+  const int axis_size = shape[axis];
+  if (axis_size == 0) {
+    return 0;
+  }
+  const bool shrink_axis = shrink_mask & (1 << axis);
+  int stop = stop_indices[axis];
+
+  if (shrink_axis) {
+    return start_for_axis + 1;
+  }
+  if (mask & (1 << axis)) {
+    stop = strides[axis] < 0 ? 0 : axis_size;
+  }
+  stop = (stop < 0) ? stop + axis_size : stop;
+
+  if (strides[axis] > 0) {
+    stop = Clamp(stop, 0, axis_size);
+  } else {
+    stop = Clamp(stop, -1, axis_size - 1);
+  }
+  return stop;
+}
+
+std::vector<int64_t> shape_expand_dim(llvm::ArrayRef<int64_t> shape, int dims) {
+  int diff = dims - shape.size();
+  if (diff == 0)
+    return shape.vec();
+  std::vector<int64_t> shape_v(shape.begin(), shape.end());
+  shape_v.insert(shape_v.begin(), diff, 1);
+  return shape_v;
+}
+
+bool compare(float a, float b, llvm::StringRef mode) {
+  if (mode == "Equal") {
+    return a == b;
+  }
+  if (mode == "Greater") {
+    return a > b;
+  }
+  if (mode == "GreaterOrEqual") {
+    return a >= b;
+  }
+  if (mode == "Less") {
+    return a < b;
+  }
+  if (mode == "LessOrEqual") {
+    return a <= b;
+  }
+  llvm_unreachable("Not Implemented");
+  return false;
+}
+
+// to compilable with gemmlowp
+// fixedpoint/fixedpoint.h:exp_on_interval_between_negative_one_quarter_and_0_excl()
+// return exp(x) for x in [-1/4, 0). Taylor expansion.
+int32_t exp_on_interval_between_negative_one_quarter_and_0_excl(int input) {
+  const int32_t const_term = 1895147668;
+  const int32_t const_1_over_3 = 715827883;
+  const int32_t const_1_over_8 = 1 << 28;
+  int32_t x = input + const_1_over_8;
+
+#define QUANT_MUL(x, y)                                                        \
+  RightShiftRound((int64_t)x *(int64_t)y, 31, ROUNDING_HALF_UP);
+
+  int32_t x2 = QUANT_MUL(x, x);
+  int32_t x3 = QUANT_MUL(x2, x);
+  int32_t x4 = QUANT_MUL(x2, x2);
+  int32_t x4_over_4 = RightShiftRound(x4, 2, ROUNDING_HALF_AWAY_FROM_ZERO);
+  int32_t x4_over_12_plus_x3_over_3_plus_x2 =
+      QUANT_MUL((x4_over_4 + x3), const_1_over_3);
+  int32_t x4_over_24_plus_x3_over_6_plus_x2_over_2 = RightShiftRound(
+      x4_over_12_plus_x3_over_3_plus_x2, 1, ROUNDING_HALF_AWAY_FROM_ZERO);
+  int32_t out =
+      const_term +
+      QUANT_MUL((x4_over_24_plus_x3_over_6_plus_x2_over_2 + x), const_term);
+  return out;
+}
+
+// to compilable with gemmlowp
+// fixedpoint/fixedpoint.h:exp_on_negative_values()
+int32_t exp_on_negative_values(int input, int int_bits) {
+  const int type_size = sizeof(int32_t); // input type is int32
+  const int zero = 0;
+  const int max_value = (1U << 31) - 1;
+  const int total_bits = 8 * type_size;
+  const int fract_bits = total_bits - 1 - int_bits;
+  const int one = int_bits == 0 ? max_value : (1 << fract_bits);
+  if (int_bits > 5) {
+    int clamp_b = int_bits > 5 ? 36 - int_bits : 0;
+    int clamp = clamp_b; // TODO: for input is 32bit; if input is 16bit,
+                         // (clamp_b << 16), half away form zero
+    if (input < clamp) {
+      return zero;
+    }
+  }
+  if (input == 0) {
+    return one;
+  }
+  const int one_quarter = 1 << (fract_bits - 2);
+  int mask = one_quarter - 1;
+  int a_mod_quarter_minus_one_quarter = (input & mask) - one_quarter;
+  int32_t result = exp_on_interval_between_negative_one_quarter_and_0_excl(
+      a_mod_quarter_minus_one_quarter);
+  int32_t remainder = a_mod_quarter_minus_one_quarter - input;
+
+#define EXP_BARREL_SHIFTER(Exp, Multiplier)                                    \
+  if (int_bits > Exp) {                                                        \
+    int shift_num = fract_bits + Exp;                                          \
+    if (remainder & (1 << shift_num)) {                                        \
+      result = RightShiftRound((int64_t)result * (int64_t)Multiplier, 31,      \
+                               ROUNDING_HALF_UP);                              \
+    }                                                                          \
+  }
+
+  EXP_BARREL_SHIFTER(-2, 1672461947); // exp(-1/4)
+  EXP_BARREL_SHIFTER(-1, 1302514674); // exp(-1/2)
+  EXP_BARREL_SHIFTER(+0, 790015084);  // exp(-1)
+  EXP_BARREL_SHIFTER(+1, 290630308);  // exp(-2)
+  EXP_BARREL_SHIFTER(+2, 39332535);   // exp(-4)
+  EXP_BARREL_SHIFTER(+3, 720401);     // exp(-8)
+  EXP_BARREL_SHIFTER(+4, 242);        // exp(-16)
+
+#undef EXP_BARREL_SHIFTER
+
+  return result;
 }
 
 } // namespace tpu_mlir

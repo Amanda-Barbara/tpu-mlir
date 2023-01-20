@@ -7,23 +7,27 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "tpu_mlir/Dialect/Tpu/Transforms/Passes.h"
 #include "tpu_mlir/Dialect/Tpu/IR/TpuOps.h"
-#include "tpu_mlir/Support/Helper/Module.h"
-
+#include "tpu_mlir/Dialect/Tpu/Transforms/BM1684/WeightReorder.h"
+#include "tpu_mlir/Dialect/Tpu/Transforms/BM168x/WeightReorder.h"
+#include "tpu_mlir/Dialect/Tpu/Transforms/CV18xx/WeightReorder.h"
+#include "tpu_mlir/Dialect/Tpu/Transforms/Passes.h"
+#include "tpu_mlir/Support/Module.h"
 #include "mlir/IR/BlockAndValueMapping.h"
-#include "mlir/Dialect/Quant/QuantTypes.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
-#include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Format.h"
+#include "llvm/Support/raw_ostream.h"
+#include "tpu_mlir/Backend/Arch.h"
 
-#include <sstream>
+#include <cstdint>
 #include <fstream>
 #include <set>
+#include <sstream>
 
 using namespace llvm;
 using namespace mlir;
-using namespace tpu_mlir::helper;
+
+using namespace tpu_mlir::backend;
 namespace tpu_mlir {
 namespace tpu {
 
@@ -31,23 +35,28 @@ class WeightReorderPass : public WeightReorderBase<WeightReorderPass> {
 public:
   WeightReorderPass() {}
   void runOnOperation() override {
-    auto module = getOperation();
-    auto state = Module::getState(module);
-    if (state != Module::State::TPU_LOWERED) {
+    auto mOp = getOperation();
+    if (!module::isState(module::State::TPU_LOWERED)) {
       llvm_unreachable("module should be tpu quantized");
     }
-    for (auto func : module.getOps<FuncOp>()) {
-      func.walk([&](WeightReorderInterface op) {
-        op.weight_reorder();
-      });
+    RewritePatternSet patterns(mOp.getContext());
+    if (module::isBM1684Family()) {
+      bm1684::populateWeightReorderPatterns(&patterns);
+    } else if (module::isBM1684XFamily()) {
+      bm1684x::populateWeightReorderPatterns(&patterns);
+    } else if (module::isCV18xx()) {
+      cv18xx::populateWeightReorderPatterns(&patterns);
     }
-    Module::updateModuleTypes(module);
-    Module::setState(module, Module::State::TPU_REORDERED);
+    auto config = GreedyRewriteConfig();
+    config.maxIterations = 0; // apply each pattern only once.
+    applyPatternsAndFoldGreedily(mOp, std::move(patterns), config);
+    module::updateModuleTypes();
+    module::setState(module::State::TPU_REORDERED);
   }
 };
 
 std::unique_ptr<OperationPass<ModuleOp>> createWeightReorderPass() {
   return std::make_unique<WeightReorderPass>();
 }
-} // namespace top
+} // namespace tpu
 } // namespace tpu_mlir

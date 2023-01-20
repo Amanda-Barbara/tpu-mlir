@@ -13,7 +13,7 @@
 
 using namespace llvm;
 using namespace mlir;
-using namespace tpu_mlir::helper;
+
 namespace tpu_mlir {
 namespace top {
 
@@ -21,12 +21,12 @@ class MarkFLOPsPass : public MarkFLOPsBase<MarkFLOPsPass> {
 public:
   MarkFLOPsPass() {}
   void runOnOperation() override {
-    auto module = getOperation();
+    auto mOp = getOperation();
     int64_t flops = 0;
-    for (auto func : module.getOps<FuncOp>()) {
+    for (auto func : mOp.getOps<FuncOp>()) {
       func.walk([&](FlopsInterface op) { flops += op.getFLOPs(); });
     }
-    Module::setFLOPs(module, flops);
+    module::setFLOPs(flops);
   }
 };
 

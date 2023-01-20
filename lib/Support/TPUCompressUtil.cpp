@@ -461,7 +461,7 @@ WeightCompresser::WeightCompresser(Operation* op, bool do_compress) {
   if (auto w_cast_op = dyn_cast<top::WeightOp>(weight_op)) {
     // TODO check if weight is redundant
     // or remve redundant weight before codegen
-    // by use Module::removeUnusedOp(module);
+    // by use module::removeUnusedOp(module);
     if (weight_op->hasOneUse() == false) {
     return;
     }
@@ -469,7 +469,7 @@ WeightCompresser::WeightCompresser(Operation* op, bool do_compress) {
     old_data.resize(data->size());
     new_data.assign(data->size(), 0);
     memcpy(old_data.data(), data->data(), data->size());
-    rtype = w_cast_op.output().getType().cast<RankedTensorType>();
+    rtype = w_cast_op.getOutput().getType().cast<RankedTensorType>();
     done = true;
   } else {
     // fix me For other situation

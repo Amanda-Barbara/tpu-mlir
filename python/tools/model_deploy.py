@@ -13,7 +13,7 @@ import numpy as np
 import argparse
 from utils.mlir_shell import *
 from utils.mlir_parser import *
-from tools.model_runner import mlir_inference, model_inference
+from tools.model_runner import mlir_inference, model_inference, show_fake_cmd
 import pymlir
 
 
@@ -25,10 +25,6 @@ def str2list(v):
     return files
 
 
-def show_fake_cmd(in_npz: str, model: str, out_npz: str):
-    print("[CMD]: model_runner.py --input {} --model {} --output {}".format(in_npz, model, out_npz))
-
-
 class DeployTool:
 
     def __init__(self, args):
@@ -36,7 +32,6 @@ class DeployTool:
         self.chip = args.chip.lower()
         self.excepts = args.excepts
         self.tolerance = args.tolerance
-        self.correctness = args.correctness
         self.test_input = args.test_input
         self.quantize = args.quantize.lower()
         self.asymmetric = args.asymmetric
@@ -50,8 +45,12 @@ class DeployTool:
         self.module = MlirParser(args.mlir)
         self.module_name = self.module.module_name
         self.state = self.module.module_state
+        self.correctness = "0.99,0.90"
+        if self.quantize_table:
+            self.correctness = "0.99,0.85"
         self.in_f32_npz = self.module_name + "_in_f32.npz"
         self.prefix = "{}_{}_{}".format(self.module_name, self.chip, self.quantize)
+        self.dynamic = args.dynamic
         if self.quantize == "int8":
             if self.asymmetric:
                 self.prefix += "_asym"
@@ -99,22 +98,14 @@ class DeployTool:
         f32_blobs_compare(self.tpu_npz, self.ref_npz, self.tolerance, self.excepts)
 
     def build_model(self):
-        if self.chip.find("cv18") >= 0:
-            mlir_to_cvi_model(
-                self.tpu_mlir,
-                self.model,
-                self.final_mlir,
-                self.quant_input,
-                self.quant_output,
-            )
-        else:
-            mlir_to_model(
-                self.tpu_mlir,
-                self.model,
-                self.final_mlir,
-                self.quant_input,
-                self.quant_output,
-            )
+        mlir_to_model(
+            self.tpu_mlir,
+            self.model,
+            self.final_mlir,
+            self.dynamic,
+            self.quant_input,
+            self.quant_output,
+        )
         if self.do_validate:
             tool.validate_model()
 
@@ -124,9 +115,9 @@ class DeployTool:
         model_outputs = model_inference(self.inputs, self.model)
         np.savez(self.model_npz, **model_outputs)
         if self.state == "TOP_QUANTIZED":
-            f32_blobs_compare(self.model_npz, self.ref_npz, self.correctness)
+            f32_blobs_compare(self.model_npz, self.ref_npz, self.correctness, self.excepts)
         else:
-            f32_blobs_compare(self.model_npz, self.tpu_npz, self.correctness)
+            f32_blobs_compare(self.model_npz, self.tpu_npz, self.correctness, self.excepts)
 
 
 if __name__ == '__main__':
@@ -136,15 +127,13 @@ if __name__ == '__main__':
     parser.add_argument("--mlir", required=True, help="optimized mlir fp32 model")
     parser.add_argument("--calibration_table", help="calibration table for int8 quantization")
     parser.add_argument("--quantize_table", help="table of OPs that quantized to specific mode")
-    parser.add_argument("--quantize", default="F32", type=str, choices=['F32', 'BF16', 'F16', 'INT8'],
+    parser.add_argument("--quantize", default="F32", type=str, choices=['F32', 'BF16', 'F16', 'INT8','QDQ'],
                         help="set default qauntization type: F32/BF16/F16/INT8")
-    parser.add_argument("--asymmetric", action='store_true', default=False,
-                        help="for INT8 quantization")
+    parser.add_argument("--asymmetric", action='store_true', help="do INT8 asymmetric quantization")
     parser.add_argument("--excepts", default='-', help="excepts")
     parser.add_argument("--tolerance", default='0.8,0.5', help="tolerance")
-    parser.add_argument("--correctness", default='0.99,0.90', help="correctness")
     parser.add_argument("--chip", required=True, type=str,
-                        choices=['bm1684x', 'bm1684', 'cv183x', 'cv182x', 'cv181x'],
+                        choices=['bm1686', 'bm1684x', 'bm1684', 'cv183x', 'cv182x', 'cv181x'],
                         help="chip platform name")
     parser.add_argument("--test_input", default="", type=str2list,
                         help="input npy/npz file for inference, "
@@ -156,6 +145,7 @@ if __name__ == '__main__':
                         help="strip input type cast in bmodel, need outside type conversion")
     parser.add_argument("--quant_output", action="store_true",
                         help="strip output type cast in bmodel, need outside type conversion")
+    parser.add_argument("--dynamic", action='store_true',  help="do compile dynamic")
     # yapf: enable
     args = parser.parse_args()
     tool = DeployTool(args)

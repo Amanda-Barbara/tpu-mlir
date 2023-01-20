@@ -9,21 +9,37 @@
 //===----------------------------------------------------------------------===//
 
 #include "tpu_mlir/Dialect/Tpu/IR/TpuOps.h"
-// #include "tpu_mlir/Backend/BM168x/cv18xx.h"
-#include "tpu_mlir/Support/Helper/Quant.h"
-#include "tpu_mlir/Support/Helper/Module.h"
+#include "tpu_mlir/Backend/CV18xx/CV18xx.h"
+#include "tpu_mlir/Backend/CV18xx/CV18xx_global_api.h"
+#include "tpu_mlir/Support/Module.h"
 
-using namespace mlir;
-using namespace tpu_mlir;
-using namespace tpu_mlir::helper;
-// using namespace tpu_mlir::backend;
+#include "tpu_mlir/Support/MathUtils.h"
+
+
+
+using namespace tpu_mlir::backend;
 
 // =========================================
 // GlobalGenInterface
 // =========================================
 
-void tpu::PReluOp::codegen_global_cv18xx(void* ctx, int64_t layer_id) {
-  llvm_unreachable("Not supported now");
+void tpu::PReluOp::codegen_global_cv18xx( int64_t layer_id) {
+
+  gaddr_t ga_input = module::getAddress(getInput());
+  gaddr_t ga_output = module::getAddress(getOutput());
+  gaddr_t ga_slope =  module::getAddress(this->getSlope());
+  int64_t n, c, h, w;
+  module::getNCHW(getInput(), n, c, h, w);
+  if (module::isUniformQuantized(getOutput())) {
+    int LE_scale = this->getRshift();
+    int rshift_pos = this->getRshiftPos().value();
+    int m_i8_pos = this->getMultiplierPos().value();
+    cvi_backend_tg_fixed_prelu_kernel( layer_id, ga_input, ga_output, ga_slope,
+                                        n, c, h, w, rshift_pos, m_i8_pos, LE_scale);
+  } else {
+    cvi_backend_tg_bf16_prelu_kernel( layer_id, ga_input, ga_output,
+                                      ga_slope, n, c, h, w);
+  }
 }
 
 // =========================================

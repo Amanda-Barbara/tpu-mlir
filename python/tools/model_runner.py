@@ -14,35 +14,59 @@ import argparse
 import os
 import struct
 
+
 def round_away_from_zero(x):
     a = np.floor(np.abs(x) + 0.5)
     return np.sign(x) * a
 
+
 def bf16_to_fp32(d_bf16):
-  s = d_bf16.shape
-  d_bf16 = d_bf16.flatten()
-  assert d_bf16.dtype == np.uint16
-  d_fp32 = np.empty_like(d_bf16, dtype=np.float32)
-  for i in range(len(d_bf16)):
-    d_fp32[i] = struct.unpack('<f', struct.pack('<HH', 0, d_bf16[i]))[0]
-  return d_fp32.reshape(s)
+    s = d_bf16.shape
+    d_bf16 = d_bf16.flatten()
+    assert d_bf16.dtype == np.uint16
+    d_fp32 = np.empty_like(d_bf16, dtype=np.float32)
+    for i in range(len(d_bf16)):
+        d_fp32[i] = struct.unpack('<f', struct.pack('<HH', 0, d_bf16[i]))[0]
+    return d_fp32.reshape(s)
+
 
 def fp32_to_bf16(d_fp32):
-  s = d_fp32.shape
-  d_fp32 = d_fp32.flatten()
-  assert d_fp32.dtype == np.float32
-  d_bf16 = np.empty_like(d_fp32, dtype=np.uint16)
-  for i in range(len(d_bf16)):
-    bytes = struct.pack('f', d_fp32[i])
-    d_bf16[i] = struct.unpack('<H', struct.pack('BB', bytes[2], bytes[3]))[0]
-  return d_bf16.reshape(s)
+    s = d_fp32.shape
+    d_fp32 = d_fp32.flatten()
+    assert d_fp32.dtype == np.float32
+    d_bf16 = np.empty_like(d_fp32, dtype=np.uint16)
+    for i in range(len(d_bf16)):
+        bytes = struct.pack('f', d_fp32[i])
+        d_bf16[i] = struct.unpack('<H', struct.pack('BB', bytes[2], bytes[3]))[0]
+    return d_bf16.reshape(s)
+
+def show_fake_cmd(in_npz: str, model: str, out_npz: str):
+    print("[CMD]: model_runner.py --input {} --model {} --output {}".format(in_npz, model, out_npz))
 
 def model_inference(inputs: dict, model_file: str) -> dict:
     pyruntime = "pyruntime_"
+    is_cv18xx = False
+    is_dynamic = False
     if model_file.endswith(".bmodel"):
         pyruntime = pyruntime + "bm"
+        # check dynamic
+        fd = os.popen("model_tool --is_dynamic {}".format(model_file))
+        dynamic = fd.read()
+        fd.close()
+        if dynamic == 'true':
+            is_dynamic = True
+        # trick for runtime link chip cmodel
+        fd = os.popen("model_tool --chip {}".format(model_file))
+        chip = fd.read()
+        fd.close()
+        lib_so = 'libcmodel_1684x.so'
+        if chip == 'BM1686':
+            lib_so = 'libcmodel_1686.so'
+        cmd = 'ln -sf $TPUC_ROOT/lib/{} $TPUC_ROOT/lib/libcmodel.so'.format(lib_so)
+        os.system(cmd)
     elif model_file.endswith(".cvimodel"):
         pyruntime = pyruntime + "cvi"
+        is_cv18xx = True
     else:
         raise RuntimeError("not support modle file:{}".format(model_file))
     pyruntime = importlib.import_module(pyruntime)
@@ -53,36 +77,60 @@ def model_inference(inputs: dict, model_file: str) -> dict:
         net = model.Net(model.networks[0])
     except AttributeError:
         net = model
+    dyn_input_shapes = []
     for i in net.inputs:
         assert i.name in inputs
-        assert np.prod(i.data.shape) == np.prod(inputs[i.name].shape)
+        input = inputs[i.name]
+        overflow = np.prod(i.data.shape) - np.prod(input.shape)
+        if is_dynamic:
+            assert(len(i.data.shape) == len(input.shape))
+            for max,dim in zip(i.data.shape, input.shape):
+                if dim > max:
+                    raise RuntimeError("Error shape: form {} to {}".format(i.data.shape, input.shape))
+            dyn_input_shapes.append(input.shape)
+            input = np.concatenate([input.flatten(), np.zeros([overflow]).astype(input.dtype)]).reshape(i.data.shape)
+        elif overflow != 0:
+            raise RuntimeError("Error shape: form {} to {}".format(i.data.shape, input.shape))
         zp = i.qzero_point
-        if i.data.dtype == inputs[i.name].dtype:
-            i.data[:] = inputs[i.name].reshape(i.data.shape)
-        elif i.dtype == "i8" and inputs[i.name].dtype == np.float32:
-            data = round_away_from_zero(inputs[i.name] * i.qscale + zp)
+        if i.data.dtype == input.dtype:
+            i.data[:] = input.reshape(i.data.shape)
+        elif i.dtype == "i8" and input.dtype == np.float32:
+            data = round_away_from_zero(input * i.qscale + zp)
             i.data[:] = np.clip(data, -128, 127).astype(np.int8).reshape(i.data.shape)
-        elif i.dtype == "u8" and inputs[i.name].dtype == np.float32:
-            data = round_away_from_zero(inputs[i.name] * i.qscale + zp)
+        elif i.dtype == "u8" and input.dtype == np.float32:
+            data = round_away_from_zero(input * i.qscale + zp)
             i.data[:] = np.clip(data, 0, 255).astype(np.uint8).reshape(i.data.shape)
-        elif i.dtype == "f16" and inputs[i.name].dtype == np.float32:
-            i.data[:] = inputs[i.name].astype(np.float16)
-        elif i.dtype == "bf16" and inputs[i.name].dtype == np.float32:
-            i.data[:] = fp32_to_bf16(inputs[i.name])
+        elif i.dtype == "f16" and input.dtype == np.float32:
+            i.data[:] = input.astype(np.float16)
+        elif i.dtype == "bf16" and input.dtype == np.float32:
+            i.data[:] = fp32_to_bf16(input)
         else:
-            raise ValueError(f"unknown type: form {inputs[i.name].dtype} to {i.data.dtype}")
-    net.forward()
+            raise ValueError(f"unknown type: form {input.dtype} to {i.data.dtype}")
+    if not is_dynamic:
+        net.forward()
+    else:
+        dyn_output_shapes = net.forward_dynamic(dyn_input_shapes)
+    dyn_idx = 0
     for i in net.outputs:
         if (i.data.dtype == np.int8 or i.data.dtype == np.uint8) and i.qscale != 0:
-            zp = i.qzero_point
-            outputs[i.name] = np.array((i.data.astype(np.float32) - zp) * np.float32(i.qscale),
-                                       dtype=np.float32)
+            if is_cv18xx and i.name in inputs:
+                name = i.name + "_si8" if i.data.dtype == np.int8 else "_ui8"
+                outputs[name] = np.array(i.data.astype(np.float32)/ np.float32(i.qscale))
+            else :
+                zp = i.qzero_point
+                outputs[i.name] = np.array((i.data.astype(np.float32) - zp) * np.float32(i.qscale),
+                                           dtype=np.float32)
         elif (i.dtype == "f16"):
             outputs[i.name] = np.array(i.data.astype(np.float32))
         elif (i.dtype == "bf16"):
             outputs[i.name] = bf16_to_fp32(i.data)
         else:
             outputs[i.name] = np.array(i.data)
+        if is_dynamic:
+            if outputs[i.name].shape != dyn_output_shapes[dyn_idx]:
+                dyn_len = np.prod(dyn_output_shapes[dyn_idx])
+                outputs[i.name] = outputs[i.name].flatten()[:dyn_len].reshape(*dyn_output_shapes[dyn_idx])
+                dyn_idx += 1
     return outputs
 
 
@@ -117,20 +165,20 @@ def onnx_inference(inputs: dict, onnx_file: str, dump_all: bool = True) -> dict:
         output_keys = []
         model = onnx.load(onnx_file)
         no_list = [
-            "Cast", "Shape", "Unsqueeze", "Split", "Constant", "GRU", "Sqrt", "ReduceMean", "Pow",
-            "Sub", "Dropout", "Loop", "TopK"
+            "Cast", "Shape", "Unsqueeze", "Constant", "Dropout", "Loop", "TopK"
         ]
 
         # tested commited #c3cea486d https://github.com/microsoft/onnxruntime.git
         for x in model.graph.node:
             if x.op_type in no_list:
                 continue
-            _intermediate_tensor_name = list(x.output)
-            intermediate_tensor_name = ",".join(_intermediate_tensor_name)
-            intermediate_layer_value_info = onnx.helper.ValueInfoProto()
-            intermediate_layer_value_info.name = intermediate_tensor_name
-            model.graph.output.append(intermediate_layer_value_info)
-            output_keys.append(intermediate_layer_value_info.name + '_' + x.op_type)
+            for name in x.output:
+                if not name:
+                    continue
+                intermediate_layer_value_info = onnx.helper.ValueInfoProto()
+                intermediate_layer_value_info.name = name
+                model.graph.output.append(intermediate_layer_value_info)
+                output_keys.append(intermediate_layer_value_info.name + '_' + x.op_type)
         dump_all_tensors_onnx = onnx_file.replace('.onnx', '_all.onnx', 1)
         onnx.save(model, dump_all_tensors_onnx)
         return output_keys, dump_all_tensors_onnx
@@ -198,7 +246,6 @@ def tflite_inference(
 ) -> dict:
     # TFLiteInterpreter is heavy, only import it when needed.
     from transform.TFLiteInterpreter import TFLiteInterpreter
-
     session = TFLiteInterpreter(
         tflite_file,
         experimental_preserve_all_tensors=dump_all,
@@ -209,7 +256,6 @@ def tflite_inference(
             tensor = session.to_expressed_dat(tensor_with_desc)
         else:
             _, tensor = tensor_with_desc
-
         if not tf_layout:
             if tensor.ndim == 4:
                 return tensor.transpose([0, 3, 1, 2])

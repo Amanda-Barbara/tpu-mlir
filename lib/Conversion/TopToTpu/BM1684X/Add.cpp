@@ -25,8 +25,8 @@ void AddLowering::LoweringINT8(PatternRewriter &rewriter, top::AddOp addOp,
   std::vector<int64_t> multiplier_v(nInputs, 1);
   int64_t o_zp;
   double o_scale;
-  Quant::getScaleAndZeroPoint(addOp.output(), o_scale, o_zp, asymmetric);
-  auto coeff_v = Module::getF64Array(addOp.coeff(), nInputs, 1.0);
+  module::getScaleAndZeroPoint(addOp.getOutput(), o_scale, o_zp, asymmetric);
+  auto coeff_v = module::getF64Array(addOp.getCoeff(), nInputs, 1.0);
 
   double scale;
   int64_t zeropoint;
@@ -39,7 +39,6 @@ void AddLowering::LoweringINT8(PatternRewriter &rewriter, top::AddOp addOp,
       float fmax, fmin;
       findMinMax(constF32->data(), constF32->size(), &fmin, &fmax);
       bool cSign = (fmin < 0);
-      float fqmax = cSign ? 127 : 255;
       auto filter_type = input.getType().cast<RankedTensorType>();
       auto new_type = RankedTensorType::get(filter_type.getShape(),
                                             rewriter.getIntegerType(8, cSign));
@@ -47,9 +46,8 @@ void AddLowering::LoweringINT8(PatternRewriter &rewriter, top::AddOp addOp,
       scale = o_scale; // Merge o_scale to Qconst, reducing multiple and shift
       if (cSign) {
         auto constI8 = std::make_shared<std::vector<int8_t>>(constF32->size());
-        std::transform(
-            constF32->begin(), constF32->end(), constI8->begin(),
-            [&](const float cf32) { return Quant::to_int8(cf32 / scale); });
+        std::transform(constF32->begin(), constF32->end(), constI8->begin(),
+                       [&](const float cf32) { return to_int8(cf32 / scale); });
         auto new_filter =
             top::WeightOp::create(constOp, "i8", *constI8, new_type);
         operands.push_back(new_filter);
@@ -57,14 +55,14 @@ void AddLowering::LoweringINT8(PatternRewriter &rewriter, top::AddOp addOp,
         auto constU8 = std::make_shared<std::vector<uint8_t>>(constF32->size());
         std::transform(
             constF32->begin(), constF32->end(), constU8->begin(),
-            [&](const float cf32) { return Quant::to_uint8(cf32 / scale); });
+            [&](const float cf32) { return to_uint8(cf32 / scale); });
         auto new_filter =
             top::WeightOp::create(constOp, "u8", *constU8, new_type);
         operands.push_back(new_filter);
       }
     } else {
       operands.push_back(input);
-      Quant::getScaleAndZeroPoint(input, scale, zeropoint, asymmetric);
+      module::getScaleAndZeroPoint(input, scale, zeropoint, asymmetric);
       auto scale_f = scale / o_scale;
       // get_scale_and_shift(coeff_v->at(i) * scale_f, scalei, shifti, 8);
       // "get_scale_and_shift_positive" use positive right_shift, left_shift
@@ -76,45 +74,39 @@ void AddLowering::LoweringINT8(PatternRewriter &rewriter, top::AddOp addOp,
   }
 
   std::vector<NamedAttribute> attrs;
-  attrs.push_back(rewriter.getNamedAttr("do_relu", addOp.do_reluAttr()));
+  attrs.push_back(rewriter.getNamedAttr("do_relu", addOp.getDoReluAttr()));
   attrs.push_back(rewriter.getNamedAttr(
       "multipliers", rewriter.getI64ArrayAttr(multiplier_v)));
   attrs.push_back(
       rewriter.getNamedAttr("rshifts", rewriter.getI64ArrayAttr(rshift_v)));
-  auto newType = Quant::getQuantInt8Type(addOp.output(), asymmetric);
+  auto newType = getQuantInt8Type(addOp.getOutput(), asymmetric);
   rewriter.replaceOpWithNewOp<tpu::AddOp>(op, newType, operands, attrs);
 }
 
-void AddLowering::LoweringF32(PatternRewriter &rewriter,
-                              top::AddOp addOp) const {
-  lowering_common_f32<tpu::AddOp>(rewriter, addOp.getOperation());
+void AddLowering::LoweringINT4(PatternRewriter &rewriter, top::AddOp op,
+                               bool asymmetric) const {
+  LoweringINT8(rewriter, op, asymmetric);
 }
 
-void AddLowering::LoweringBF16(PatternRewriter &rewriter,
-                               top::AddOp addOp) const {
-  for (int i = 0, n = addOp.getNumOperands(); i < n; ++i) {
-    if (auto constOp =
-            dyn_cast<top::WeightOp>(addOp.getOperand(i).getDefiningOp())) {
-      addOp.setOperand(i, constOp.clone_bf16(addOp));
-    }
-  }
-  lowering_common_bf16<tpu::AddOp>(rewriter, addOp.getOperation());
+void AddLowering::LoweringF32(PatternRewriter &rewriter, top::AddOp op) const {
+  lowering_common_f32<tpu::AddOp>(rewriter, op);
 }
 
-void AddLowering::LoweringF16(PatternRewriter &rewriter,
-                              top::AddOp addOp) const {
-  for (int i = 0, n = addOp.getNumOperands(); i < n; ++i) {
-    if (auto constOp =
-            dyn_cast<top::WeightOp>(addOp.getOperand(i).getDefiningOp())) {
-      addOp.setOperand(i, constOp.clone_f16(addOp));
-    }
-  }
-  lowering_common_f16<tpu::AddOp>(rewriter, addOp.getOperation());
+void AddLowering::LoweringBF16(PatternRewriter &rewriter, top::AddOp op) const {
+  lowering_common_bf16<tpu::AddOp>(rewriter, op);
 }
 
+void AddLowering::LoweringF16(PatternRewriter &rewriter, top::AddOp op) const {
+  lowering_common_f16<tpu::AddOp>(rewriter, op);
+}
+
+//                / input0 -> dequant \
+// quant add ==> |                      add -> requant
+//                \ input1 -> dequant /
 void AddLowering::LoweringQuantized(PatternRewriter &rewriter,
                                     top::AddOp addOp) const {
-  if (Quant::isUniformQuantized(addOp.inputs()[0], addOp.output()) == false) {
+  if (module::isUniformQuantized(addOp.getInputs()[0], addOp.getOutput()) ==
+      false) {
     llvm_unreachable("input output should be quantized");
   }
   auto op = addOp.getOperation();
@@ -127,13 +119,13 @@ void AddLowering::LoweringQuantized(PatternRewriter &rewriter,
   std::vector<double> scale_v(nInputs);
   int64_t zeropoint;
   double o_scale;
-  Quant::getScaleAndZeroPoint(addOp.output(), o_scale, zeropoint, true);
+  module::getScaleAndZeroPoint(addOp.getOutput(), o_scale, zeropoint, true);
 
   // generate quant param from given scale
   double scale, scale_max;
   for (int i = 0; i < nInputs; i++) {
     auto input = op->getOperand(i);
-    Quant::getScaleAndZeroPoint(input, scale, zeropoint, true);
+    module::getScaleAndZeroPoint(input, scale, zeropoint, true);
     scale_v[i] = scale;
     if (i == 0) {
       scale_max = scale;
@@ -150,40 +142,60 @@ void AddLowering::LoweringQuantized(PatternRewriter &rewriter,
   }
 
   std::vector<Value> operands;
-  auto ctx = op->getContext();
+  bool is_const = false;
+  int32_t const_val = 0;
 
-  // dequant left
-  auto input0_dequant =
-      do_dequant(addOp.inputs()[0], rewriter.getI32Type(), multiplier_v[0],
-                 shift_v[0], tpu::DequantMode::TFlite, lshift);
-  // op->setOperand(0, input0_dequant);
-  operands.push_back(input0_dequant);
-  // dequant right
-  auto input1_dequant =
-      do_dequant(addOp.inputs()[1], rewriter.getI32Type(), multiplier_v[1],
-                 shift_v[1], tpu::DequantMode::TFlite, lshift);
-  // op->setOperand(1, input1_dequant);
-  operands.push_back(input1_dequant);
+  for (int i = 0; i < nInputs; ++i) {
+    auto input = addOp->getOperand(i);
+    if (isa<top::WeightOp>(input.getDefiningOp())) {
+      // do dequant in here
+      int64_t num_elem = module::getNumElements(input);
+      if (num_elem != 1) {
+        auto new_input = do_weight_dequant(input, rewriter.getI32Type(),
+                                           multiplier_v[i], shift_v[i], lshift);
+        operands.push_back(new_input);
+      } else {
+        const_val =
+            do_const_dequant(input, multiplier_v[i], shift_v[i], lshift);
+        is_const = true;
+      }
+    } else {
+      // do dequant
+      std::string name =
+          module::getName(op).str() + "_dequant_" + std::to_string(i);
+      auto name_loc = NameLoc::get(rewriter.getStringAttr(name));
+      auto input_dequant =
+          do_dequant(name_loc, input, rewriter.getI32Type(), multiplier_v[i],
+                     shift_v[i], tpu::DequantMode::TFlite, lshift);
+      operands.push_back(input_dequant);
+    }
+  }
   // add
   std::string suffix = "_add";
-  std::string new_name = Module::getName(op).str() + suffix;
+  std::string new_name = module::getName(op).str() + suffix;
   std::vector<NamedAttribute> attrs;
-  attrs.push_back(
-      rewriter.getNamedAttr("multiplier", rewriter.getI64IntegerAttr(1)));
-  attrs.push_back(
-      rewriter.getNamedAttr("shift", rewriter.getI64IntegerAttr(0)));
-
-  auto newType = RankedTensorType::get(Module::getShape(addOp.output()),
+  auto newType = RankedTensorType::get(module::getShape(addOp.getOutput()),
                                        rewriter.getI32Type());
   // auto add_quant = lowering_common<tpu::AddOp>(op, newType);
   auto name_loc = NameLoc::get(rewriter.getStringAttr(new_name));
   rewriter.setInsertionPointAfter(op);
-  auto newOp = rewriter.create<tpu::AddOp>(name_loc, newType, operands, attrs);
+  Value addout;
+  if (is_const) {
+    attrs.push_back(rewriter.getNamedAttr("const_val",
+                                          rewriter.getF64FloatAttr(const_val)));
+    auto newOp =
+        rewriter.create<tpu::AddConstOp>(name_loc, newType, operands, attrs);
+    addout = newOp.getOutput();
+  } else {
+    auto newOp =
+        rewriter.create<tpu::AddOp>(name_loc, newType, operands, attrs);
+    addout = newOp.getOutput();
+  }
   // requant to int8
   QuantizeMultiplier((scale_max * 2) / ((1 << lshift) * o_scale), &scalei,
                      &shifti);
-  auto v = do_requant(op->getLoc(), newOp.output(), addOp.output().getType(),
-                      true, scalei, shifti, tpu::RequantMode::TFlite);
+  auto v = do_requant(op->getLoc(), addout, addOp.getOutput().getType(), true,
+                      scalei, shifti, tpu::RequantMode::TFlite);
   rewriter.replaceOp(op, {v});
 }
 

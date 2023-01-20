@@ -10,54 +10,52 @@
 #include "tpu_mlir/Dialect/Tpu/IR/TpuOps.h"
 #include "tpu_mlir/Support/Dnnl/Dnnl.h"
 #include "tpu_mlir/Support/Float16.h"
-#include "tpu_mlir/Support/Helper/Module.h"
-#include "tpu_mlir/Support/Helper/Quant.h"
+#include "tpu_mlir/Support/Module.h"
+
 #include "tpu_mlir/Support/MathUtils.h"
 
-using namespace tpu_mlir;
-using namespace tpu_mlir::helper;
-using namespace mlir;
 
-void tpu::Conv1DOp::parseParam(void *param) {
-  conv_attr_t *p = (conv_attr_t *)param;
-  memset(p, 0, sizeof(conv_attr_t));
-  p->id = p->od = p->kd = p->sd = p->dd = 1;
-  p->iw = p->ow = p->kw = p->sw = p->dw = 1;
-  auto i_s = input().getType().cast<RankedTensorType>().getShape();
-  auto o_s = output().getType().cast<RankedTensorType>().getShape();
-  p->do_relu = this->do_relu();
-  p->relu_limit = relu_limit().convertToDouble();
-  p->has_bias = with_bias();
-  p->n = i_s[0];
-  p->ic = i_s[1];
-  p->ih = i_s[2];
-  p->oc = o_s[1];
-  p->oh = o_s[2];
-  auto kernel = Module::getI64Array(kernel_shape());
-  p->kh = kernel->at(0);
-  auto pads_v = Module::getI64Array(pads());
-  p->pht = pads_v->at(0);
-  p->phb = pads_v->at(1);
-  if (Quant::isUniformQuantized(input())) {
-    p->pad_value = Quant::getUniformQuantizedType(input()).getZeroPoint();
+
+conv_attr_t tpu::Conv1DOp::parseParam() {
+  conv_attr_t p = {0};
+  p.id = p.od = p.kd = p.sd = p.dd = 1;
+  p.iw = p.ow = p.kw = p.sw = p.dw = 1;
+  auto i_s = getInput().getType().cast<RankedTensorType>().getShape();
+  auto o_s = getOutput().getType().cast<RankedTensorType>().getShape();
+  p.do_relu = getDoRelu();
+  p.relu_limit = getReluLimit().convertToDouble();
+  p.has_bias = getWithBias();
+  p.n = i_s[0];
+  p.ic = i_s[1];
+  p.ih = i_s[2];
+  p.oc = o_s[1];
+  p.oh = o_s[2];
+  auto kernel = module::getI64Array(getKernelShape());
+  p.kh = kernel->at(0);
+  auto pads_v = module::getI64Array(getPads());
+  p.pht = pads_v->at(0);
+  p.phb = pads_v->at(1);
+  if (module::isUniformQuantized(getInput())) {
+    p.pad_value = module::getUniformQuantizedType(getInput()).getZeroPoint();
   }
-  if (Quant::isUniformQuantized(filter())) {
-    p->kernel_zp = Quant::getUniformQuantizedType(filter()).getZeroPoint();
+  if (module::isUniformQuantized(getFilter())) {
+    p.kernel_zp = module::getUniformQuantizedType(getFilter()).getZeroPoint();
   }
-  auto strides_v = Module::getI64Array(strides());
-  p->sh = strides_v->at(0);
-  auto dilation = Module::getI64Array(dilations(), 1, 1);
-  p->dh = dilation->at(0);
-  auto ins = Module::getI64Array(inserts(), 1, 0);
-  p->ins_h = ins->at(0);
-  assert(p->ins_h == 0 && p->ins_w == 0);
-  p->groups = group();
-  p->is_dw = (p->oc == p->ic && p->oc == p->groups && p->groups > 1);
+  auto strides_v = module::getI64Array(getStrides());
+  p.sh = strides_v->at(0);
+  auto dilation = module::getI64Array(getDilations(), 1, 1);
+  p.dh = dilation->at(0);
+  auto ins = module::getI64Array(getInserts(), 1, 0);
+  p.ins_h = ins->at(0);
+  assert(p.ins_h == 0 && p.ins_w == 0);
+  p.groups = getGroup();
+  p.is_dw = (p.oc == p.ic && p.oc == p.groups && p.groups > 1);
+  return p;
 }
+
 LogicalResult tpu::Conv1DOp::init(InferenceParameter &p) {
   auto conv = new Conv();
-  conv_attr_t attr = {0};
-  parseParam(&attr);
+  auto attr = parseParam();
 
   conv->setup(p.inputs[0], p.inputs[1], p.inputs[2], p.outputs[0], attr);
   p.handle = (void *)conv;
@@ -79,23 +77,23 @@ LogicalResult tpu::Conv1DOp::inference(InferenceParameter &p) {
   auto conv = (Conv *)p.handle;
   conv->run();
   // requant
-  auto out_type = Module::getStorageType(output());
-  auto num_elem = Module::getNumElements(output());
+  auto out_type = module::getStorageType(getOutput());
+  auto num_elem = module::getNumElements(getOutput());
   if (out_type.isa<FloatType>()) {
     if (out_type.isBF16()) {
-      f32_to_bf16(p.outputs[0], p.outputs[0], num_elem);
+      BF16(p.outputs[0], p.outputs[0], num_elem);
     } else if (out_type.isF16()) {
-      f32_to_f16(p.outputs[0], p.outputs[0], num_elem);
+      F16(p.outputs[0], p.outputs[0], num_elem);
     }
-  } else if (Quant::isUniformQuantized(output())) {
+  } else if (module::isUniformQuantized(getOutput())) {
     int64_t n, c, h, w;
-    auto sType = Module::getStorageType(output());
-    Module::getNCHW(output(), n, c, h, w);
-    auto o_qtype = Quant::getUniformQuantizedType(output());
-    auto rshift_v = Module::getI64Array(rshift().value());
-    auto multiplier_v = Module::getI64Array(multiplier(), rshift_v->size(), 1);
+    auto sType = module::getStorageType(getOutput());
+    module::getNCHW(getOutput(), n, c, h, w);
+    auto o_qtype = module::getUniformQuantizedType(getOutput());
+    auto rshift_v = module::getI64Array(getRshift().value());
+    auto multiplier_v = module::getI64Array(getMultiplier(), rshift_v->size(), 1);
     bool per_axis = rshift_v->size() == c;
-    auto mode = quant_mode();
+    auto mode = getQuantMode();
 #pragma omp parallel for schedule(static, omp_schedule(c))
     for (int ic = 0; ic < c; ic++) {
       int64_t shift = per_axis ? rshift_v->at(ic) : rshift_v->at(0);
@@ -113,8 +111,8 @@ LogicalResult tpu::Conv1DOp::inference(InferenceParameter &p) {
             v = applyMultiplierAndRShift(p.outputs[0][offset], multi, shift) +
                 o_qtype.getZeroPoint();
           }
-          p.outputs[0][offset] = sType.isUnsignedInteger(8) ? Quant::to_uint8(v)
-                                                            : Quant::to_int8(v);
+          p.outputs[0][offset] =
+              sType.isUnsignedInteger(8) ? to_uint8(v) : to_int8(v);
         }
       }
     }
@@ -125,16 +123,51 @@ LogicalResult tpu::Conv1DOp::inference(InferenceParameter &p) {
 
 LogicalResult tpu::Conv1DOp::BackwardH(int64_t &in_idx, int64_t &in_slice,
                                        int64_t out_idx, int64_t out_slice) {
-  conv_attr_t attr = {0};
-  parseParam(&attr);
+  auto attr = parseParam();
   int kh_with_dh = (attr.kh - 1) * attr.dh + 1;
   in_slice = (out_slice - 1) * attr.sh +
              (kh_with_dh >= attr.sh ? kh_with_dh : attr.sh);
   in_idx = out_idx * attr.sh - attr.pht;
-  LocalGenInterface::fixSlice(in_idx, in_slice, attr.ih);
+  bool is_last = (out_idx + out_slice == attr.oh);
+  LocalGenInterface::fixSlice(in_idx, in_slice, attr.ih, is_last);
   return success();
 }
 
 mlir::Type tpu::Conv1DOp::type_verify(uint64_t opd_idx, TypeCastMode &mode) {
   return type_verify_case_i32(getOperation(), opd_idx, mode);
+}
+
+LogicalResult tpu::Conv1DOp::DynBackwardH(int64_t &in_idx, int64_t &in_slice,
+                                       int64_t out_idx, int64_t out_slice) {
+  auto attr = parseParam();
+  int kh_with_dh = (attr.kh - 1) * attr.dh + 1;
+  in_slice = (out_slice - 1) * attr.sh +
+             (kh_with_dh >= attr.sh ? kh_with_dh : attr.sh);
+  in_idx = out_idx * attr.sh - attr.pht;
+  return success();
+}
+
+LogicalResult tpu::Conv1DOp::DynBackwardKh(int64_t &in_kh, int64_t out_kh) {
+  auto attr = parseParam();
+  int kh_with_dh = (attr.kh - 1) * attr.dh + 1;
+  in_kh = (out_kh - 1) * attr.sh + (kh_with_dh >= attr.sh ? kh_with_dh : attr.sh);
+  return success();
+}
+
+LogicalResult tpu::Conv1DOp::DynBackwardStrideH(int64_t &in_stride_h, int64_t out_stride_h) {
+  auto attr = parseParam();
+  in_stride_h = out_stride_h * attr.sh;
+  return success();
+}
+
+LogicalResult tpu::Conv1DOp::DynBackwardUpPadH(int64_t &in_up_pad_h, int64_t out_up_pad_h) {
+  auto attr = parseParam();
+  in_up_pad_h = out_up_pad_h * attr.sh + attr.pht;
+  return success();
+}
+
+LogicalResult tpu::Conv1DOp::DynBackwardDownPadH(int64_t &in_down_pad_h, int64_t out_down_pad_h) {
+  auto attr = parseParam();
+  in_down_pad_h = out_down_pad_h * attr.sh + attr.phb;
+  return success();
 }

@@ -10,16 +10,15 @@
 
 #include "tpu_mlir/Dialect/Tpu/IR/TpuOps.h"
 // #include "tpu_mlir/Backend/BM168x/cv18xx.h"
-#include "tpu_mlir/Support/Helper/Quant.h"
-#include "tpu_mlir/Support/Helper/Module.h"
+
+#include "tpu_mlir/Support/Module.h"
 #include "tpu_mlir/Support/MathUtils.h"
 
-using namespace mlir;
-using namespace tpu_mlir;
-using namespace tpu_mlir::helper;
+
+
 // using namespace tpu_mlir::backend;
 
-void tpu::LoadOp::codegen_global_cv18xx(void* ctx, int64_t layer_id) {
+void tpu::LoadOp::codegen_global_cv18xx( int64_t layer_id) {
   llvm_unreachable("global not support");
 }
 

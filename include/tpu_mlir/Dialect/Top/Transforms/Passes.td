@@ -16,6 +16,12 @@
 
 include "mlir/Pass/PassBase.td"
 
+def Init : Pass<"init", "ModuleOp"> {
+  let summary = "init module";
+  let constructor = "createInitPass()";
+  let dependentDialects = ["TopDialect"];
+}
+
 def ImportCalibrationTable : Pass<"import-calibration-table", "ModuleOp"> {
   let summary = "Import calibration table by tpuc-opt";
   let constructor = "createImportCalibrationTablePass()";
@@ -25,6 +31,12 @@ def ImportCalibrationTable : Pass<"import-calibration-table", "ModuleOp"> {
     Option<"isAsymmetric", "asymmetric", "bool", /*default=*/"true",
            "true for asymmetric quantization, or false for symmetric">,
   ];
+  let dependentDialects = ["top::TopDialect", "mlir::quant::QuantizationDialect"];
+}
+
+def QDQConvert : Pass<"convert-qdq-to-calibrated-dialect", "ModuleOp"> {
+  let summary = "Convert from qdq model to regular quantized model";
+  let constructor = "createQDQConvertPass()";
   let dependentDialects = ["top::TopDialect", "mlir::quant::QuantizationDialect"];
 }
 

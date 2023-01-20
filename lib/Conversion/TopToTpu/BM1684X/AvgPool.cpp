@@ -17,35 +17,45 @@ void AvgPoolLowering::LoweringF32(PatternRewriter &rewriter,
   auto op = poolOp.getOperation();
   op->setAttr("pool_mode",
               tpu::PoolModeAttr::get(op->getContext(), tpu::PoolMode::Avg));
-  if (poolOp.kernel_shape().size() == 3) {
+  if (poolOp.getKernelShape().size() == 3) {
     lowering_common_f32<tpu::Pool3DOp>(rewriter, op);
-  } else if (poolOp.kernel_shape().size() == 2) {
+  } else if (poolOp.getKernelShape().size() == 2) {
     lowering_common_f32<tpu::Pool2DOp>(rewriter, op);
   } else {
     lowering_common_f32<tpu::Pool1DOp>(rewriter, op);
   }
 }
 
+void AvgPoolLowering::LoweringINT4(PatternRewriter &rewriter, top::AvgPoolOp op,
+                                   bool asymmetric) const {
+  LoweringINT8(rewriter, op, asymmetric);
+}
+
 void AvgPoolLowering::LoweringINT8(PatternRewriter &rewriter,
                                    top::AvgPoolOp poolOp,
                                    bool asymmetric) const {
-  const size_t kernel_size = poolOp.kernel_shape().size();
-  auto kernel = Module::getI64Array(poolOp.kernel_shape());
-  int64_t kd = kernel_size == 3 ? kernel->at(0) : 1;
-  int64_t kh = kernel_size == 3 ? kernel->at(1) : kernel->at(0);
-  int64_t kw =
-      kernel_size == 3 ? kernel->at(2) : (kernel_size == 2 ? kernel->at(1) : 1);
-
+  auto p = poolOp.parseParam();
+  const size_t kernel_size = poolOp.getKernelShape().size();
+  int64_t kd = p.kd, kh = p.kh, kw = p.kw;
   auto op = poolOp.getOperation();
-  auto ctx = getContext();
+  if (asymmetric) {
+    // Odd case to f16, [143,143]=>[71,71]
+    int ih = (p.oh - 1) * p.sh + p.kh;
+    int iw = (p.ow - 1) * p.sw + p.kw;
+    if ((iw < p.iw + p.pad_w + p.pad_w_after) ||
+        (kernel_size > 1 && ih < p.ih + p.pad_h + p.pad_h_after)) {
+      LoweringF16(rewriter, poolOp);
+      return;
+    }
+  }
   std::vector<NamedAttribute> attrs;
   for (auto &attr : op->getAttrs()) {
     attrs.push_back(attr);
   }
   double in_scale, out_scale;
   int64_t in_zp, out_zp;
-  Quant::getScaleAndZeroPoint(poolOp.input(), in_scale, in_zp, asymmetric);
-  Quant::getScaleAndZeroPoint(poolOp.output(), out_scale, out_zp, asymmetric);
+  module::getScaleAndZeroPoint(poolOp.getInput(), in_scale, in_zp, asymmetric);
+  module::getScaleAndZeroPoint(poolOp.getOutput(), out_scale, out_zp, asymmetric);
   if (asymmetric == false && kernel_size != 3) {
     assert(in_zp == 0 && out_zp == 0);
     double scale = in_scale / (out_scale * kh * kw);
@@ -67,18 +77,18 @@ void AvgPoolLowering::LoweringINT8(PatternRewriter &rewriter,
   attrs.push_back(rewriter.getNamedAttr(
       "pool_mode", tpu::PoolModeAttr::get(getContext(), tpu::PoolMode::Avg)));
 
-  auto newType = Quant::getQuantInt8Type(poolOp.output(), asymmetric);
+  auto newType = getQuantInt8Type(poolOp.getOutput(), asymmetric);
   if (kernel_size == 1) {
     rewriter.replaceOpWithNewOp<tpu::Pool1DOp>(
-        op, newType, ValueRange{poolOp.input()}, attrs);
+        op, newType, ValueRange{poolOp.getInput()}, attrs);
 
   } else if (kernel_size == 2) {
     rewriter.replaceOpWithNewOp<tpu::Pool2DOp>(
-        op, newType, ValueRange{poolOp.input()}, attrs);
+        op, newType, ValueRange{poolOp.getInput()}, attrs);
 
   } else {
     rewriter.replaceOpWithNewOp<tpu::Pool3DOp>(
-        op, newType, ValueRange{poolOp.input()}, attrs);
+        op, newType, ValueRange{poolOp.getInput()}, attrs);
   }
 }
 
@@ -87,9 +97,9 @@ void AvgPoolLowering::LoweringBF16(PatternRewriter &rewriter,
   auto op = poolOp.getOperation();
   op->setAttr("pool_mode",
               tpu::PoolModeAttr::get(op->getContext(), tpu::PoolMode::Avg));
-  if (poolOp.kernel_shape().size() == 3) {
+  if (poolOp.getKernelShape().size() == 3) {
     lowering_common_bf16<tpu::Pool3DOp>(rewriter, op);
-  } else if (poolOp.kernel_shape().size() == 2) {
+  } else if (poolOp.getKernelShape().size() == 2) {
     lowering_common_bf16<tpu::Pool2DOp>(rewriter, op);
   } else {
     lowering_common_bf16<tpu::Pool1DOp>(rewriter, op);
@@ -101,9 +111,9 @@ void AvgPoolLowering::LoweringF16(PatternRewriter &rewriter,
   auto op = poolOp.getOperation();
   op->setAttr("pool_mode",
               tpu::PoolModeAttr::get(op->getContext(), tpu::PoolMode::Avg));
-  if (poolOp.kernel_shape().size() == 3) {
+  if (poolOp.getKernelShape().size() == 3) {
     lowering_common_f16<tpu::Pool3DOp>(rewriter, op);
-  } else if (poolOp.kernel_shape().size() == 2) {
+  } else if (poolOp.getKernelShape().size() == 2) {
     lowering_common_f16<tpu::Pool2DOp>(rewriter, op);
   } else {
     lowering_common_f16<tpu::Pool1DOp>(rewriter, op);
@@ -112,14 +122,14 @@ void AvgPoolLowering::LoweringF16(PatternRewriter &rewriter,
 
 void AvgPoolLowering::LoweringQuantized(PatternRewriter &rewriter,
                                         top::AvgPoolOp poolOp) const {
-  if (false == Quant::isUniformQuantized(poolOp.input(), poolOp.output())) {
+  if (false == module::isUniformQuantized(poolOp.getInput(), poolOp.getOutput())) {
     llvm_unreachable("input output should be quantized");
   }
   double in_scale, out_scale;
   int64_t in_zp, out_zp;
-  Quant::getScaleAndZeroPoint(poolOp.input(), in_scale, in_zp, true);
-  Quant::getScaleAndZeroPoint(poolOp.output(), out_scale, out_zp, true);
-  auto kernel = Module::getI64Array(poolOp.kernel_shape());
+  module::getScaleAndZeroPoint(poolOp.getInput(), in_scale, in_zp, true);
+  module::getScaleAndZeroPoint(poolOp.getOutput(), out_scale, out_zp, true);
+  auto kernel = module::getI64Array(poolOp.getKernelShape());
   auto kernel_size = kernel->size();
   auto kernel_sum = std::accumulate(kernel->begin(), kernel->end(), 1,
                                     std::multiplies<int64_t>());
@@ -138,13 +148,13 @@ void AvgPoolLowering::LoweringQuantized(PatternRewriter &rewriter,
       "pool_mode", tpu::PoolModeAttr::get(getContext(), tpu::PoolMode::Avg)));
   if (kernel_size == 1) {
     rewriter.replaceOpWithNewOp<tpu::Pool1DOp>(
-        op, poolOp.output().getType(), ValueRange{poolOp.input()}, attrs);
+        op, poolOp.getOutput().getType(), ValueRange{poolOp.getInput()}, attrs);
   } else if (kernel_size == 2) {
     rewriter.replaceOpWithNewOp<tpu::Pool2DOp>(
-        op, poolOp.output().getType(), ValueRange{poolOp.input()}, attrs);
+        op, poolOp.getOutput().getType(), ValueRange{poolOp.getInput()}, attrs);
   } else {
     rewriter.replaceOpWithNewOp<tpu::Pool3DOp>(
-        op, poolOp.output().getType(), ValueRange{poolOp.input()}, attrs);
+        op, poolOp.getOutput().getType(), ValueRange{poolOp.getInput()}, attrs);
   }
 }
 

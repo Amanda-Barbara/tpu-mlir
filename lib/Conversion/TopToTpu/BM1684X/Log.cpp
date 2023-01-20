@@ -12,27 +12,24 @@
 namespace tpu_mlir {
 namespace bm1684x {
 
-static double active_log(double val) { return std::log(val); }
-
 void LogLowering::LoweringF32(PatternRewriter &rewriter, top::LogOp op) const {
-  lowering_common_f32<tpu::LogOp>(rewriter, op);
+  auto op_ = op.getOperation();
+  op_->setAttr("mode",
+               tpu::ActiveModeAttr::get(op.getContext(), tpu::ActiveMode::LN));
+  lowering_common_f32<tpu::ActiveOp>(rewriter, op_);
 }
-
+void LogLowering::LoweringINT4(PatternRewriter &rewriter, top::LogOp op,
+                                   bool asymmetric) const {
+  LoweringINT8(rewriter, op, asymmetric);
+}
 void LogLowering::LoweringINT8(PatternRewriter &rewriter, top::LogOp op,
                                bool asymmetric) const {
-  auto ctx = getContext();
-  auto stype = Module::getStorageType(op.output());
-  Value table =
-      create_lookup_table(op.input(), op.output(), active_log, asymmetric);
-  std::vector<NamedAttribute> attrs;
-  for (auto &attr : op->getAttrs()) {
-    attrs.push_back(attr);
-  }
-  auto newType = Quant::getQuantInt8Type(op.output(), asymmetric);
-  rewriter.replaceOpWithNewOp<tpu::LutOp>(
-      op, newType,
-      ValueRange{op.input(), table, Module::getNoneOp(op.getOperation())},
-      attrs);
+  auto stype = module::getStorageType(op.getOutput());
+  Value table = create_lookup_table(op.getInput(), op.getOutput(), asymmetric,
+                                    [](double val) { return std::log(val); });
+  auto newType = getQuantInt8Type(op.getOutput(), asymmetric);
+  rewriter.replaceOpWithNewOp<tpu::LutOp>(op, newType,
+                                          ValueRange{op.getInput(), table});
 }
 
 void LogLowering::LoweringBF16(PatternRewriter &rewriter, top::LogOp op) const {

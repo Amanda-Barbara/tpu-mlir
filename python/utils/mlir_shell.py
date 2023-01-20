@@ -23,6 +23,7 @@ def _os_system(cmd: list):
 def mlir_opt_for_top(mlirfile, opt_mlirfile):
     cmd = [
         "tpuc-opt",
+        "--init",
         "--canonicalize",
         "--mark-FLOPs",
         "--save-weight",
@@ -40,8 +41,15 @@ def mlir_lowering(top_mlir: str,
                   chip: str,
                   cali_table: str = None,
                   asymmetric: bool = False,
-                  quantize_table: str = None):
-    cmd = ["tpuc-opt", top_mlir]
+                  quantize_table: str = None,
+                  qdq: bool = False):
+    cmd = ["tpuc-opt", top_mlir, "--init"]
+    qdq = mode.upper() == 'QDQ'
+    if qdq:
+        assert cali_table == None, "qdq cannot work with cali_table"
+        assert quantize_table == None, "qdq cannot work with quantize_table"
+        cmd.extend(["--convert-qdq-to-calibrated-dialect"])
+        mode = 'int8'
     if cali_table != None:
         cali_param = "--import-calibration-table=\"file={} asymmetric={}\"".format(
             cali_table, asymmetric)
@@ -65,58 +73,54 @@ def mlir_lowering(top_mlir: str,
 def mlir_to_model(tpu_mlir: str,
                   model: str,
                   final_mlir: str,
+                  dynamic: bool = False,
                   quant_input: bool = False,
                   quant_output: bool = False):
-    codegen_param = '--codegen="model_file={}"'.format(model)
+    # generate final mlir
     strip_io_quant_param = '--strip-io-quant="quant_input={} quant_output={}"'.format(
         quant_input, quant_output)
+    lg_param = '--layer-group="opt=2"'
+    if model.endswith(".cvimodel"):
+        # TODO: cv18xx support later
+        lg_param = ""
     cmd = [
         "tpuc-opt",
         tpu_mlir,
+        "--init",
         strip_io_quant_param,
         "--weight-reorder",
         "--subnet-divide",
-        "--layer-group",
+        lg_param,
         "--address-assign",
         "--save-weight",
-        codegen_param,
         "--mlir-print-debuginfo",
         "-o",
         final_mlir,
     ]
 
     _os_system(cmd)
+
+    # codegen based on final mlir
+    if model.endswith(".bmodel"):
+        if not dynamic:
+            codegen_param = '--codegen="model_file={}"'.format(model)
+        else:
+            codegen_param = '--dyn_codegen="model_file={}"'.format(model)
+    elif model.endswith(".cvimodel"):
+        codegen_param = '--cv-codegen="model_file={}"'.format(model)
+    cmd = [
+        "tpuc-opt",
+        final_mlir,
+        "--init",
+        codegen_param,
+        ">/dev/null",
+    ]
+    _os_system(cmd)
+
     try:
         _os_system(["mv compiler_profile_0.txt", model + ".compiler_profile_0.txt"])
     except RuntimeError:
         pass
-
-
-# tmp for cvitek, remove in the future
-def mlir_to_cvi_model(tpu_mlir: str,
-                      model: str,
-                      final_mlir: str,
-                      quant_input: bool = False,
-                      quant_output: bool = False):
-    codegen_param = '--cv-codegen="model_file={}"'.format(model)
-    strip_io_quant_param = '--strip-io-quant="quant_input={} quant_output={}"'.format(
-        quant_input, quant_output)
-    cmd = [
-        "tpuc-opt",
-        tpu_mlir,
-        strip_io_quant_param,
-        "--weight-reorder",
-        "--subnet-divide",
-        "--cv-address-assign",
-        codegen_param,
-        "--save-weight",
-        "--mlir-print-debuginfo",
-        "-o",
-        final_mlir,
-    ]
-
-    _os_system(cmd)
-
 
 def f32_blobs_compare(a_npz: str, b_npz: str, tolerance: str, excepts=None, show_detail=True):
     cmd = ["npz_tool.py", "compare", a_npz, b_npz, "--tolerance", tolerance]

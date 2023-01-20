@@ -14,25 +14,24 @@ namespace bm1684x {
 
 void SigmoidLowering::LoweringF32(PatternRewriter &rewriter,
                                   top::SigmoidOp op) const {
-  lowering_common_f32<tpu::SigmoidOp>(rewriter, op);
+  auto op_ = op.getOperation();
+  op_->setAttr("mode", tpu::ActiveModeAttr::get(op.getContext(),
+                                                tpu::ActiveMode::SIGMOID));
+  lowering_common_f32<tpu::ActiveOp>(rewriter, op_);
 }
-
-static double active_sigmoid(double val) { return 1 / (1 + std::exp(-val)); }
-
+void SigmoidLowering::LoweringINT4(PatternRewriter &rewriter, top::SigmoidOp op,
+                                   bool asymmetric) const {
+  LoweringINT8(rewriter, op, asymmetric);
+}
 void SigmoidLowering::LoweringINT8(PatternRewriter &rewriter, top::SigmoidOp op,
                                    bool asymmetric) const {
-  auto stype = Module::getStorageType(op.output());
+  auto stype = module::getStorageType(op.getOutput());
   Value table =
-      create_lookup_table(op.input(), op.output(), active_sigmoid, asymmetric);
-  std::vector<NamedAttribute> attrs;
-  for (auto &attr : op->getAttrs()) {
-    attrs.push_back(attr);
-  }
-  auto newType = Quant::getQuantInt8Type(op.output(), asymmetric);
-  rewriter.replaceOpWithNewOp<tpu::LutOp>(
-      op, newType,
-      ValueRange{op.input(), table, Module::getNoneOp(op.getOperation())},
-      attrs);
+      create_lookup_table(op.getInput(), op.getOutput(), asymmetric,
+                          [](double val) { return 1 / (1 + std::exp(-val)); });
+  auto newType = getQuantInt8Type(op.getOutput(), asymmetric);
+  rewriter.replaceOpWithNewOp<tpu::LutOp>(op, newType,
+                                          ValueRange{op.getInput(), table});
 }
 
 void SigmoidLowering::LoweringBF16(PatternRewriter &rewriter,
@@ -47,7 +46,12 @@ void SigmoidLowering::LoweringF16(PatternRewriter &rewriter,
 
 void SigmoidLowering::LoweringQuantized(PatternRewriter &rewriter,
                                         top::SigmoidOp op) const {
-  LoweringINT8(rewriter, op, true);
+  auto stype = module::getStorageType(op.getOutput());
+  Value table =
+      create_lookup_table(op.getInput(), op.getOutput(), true,
+                          [](double val) { return 1 / (1 + std::exp(-val)); });
+  rewriter.replaceOpWithNewOp<tpu::LutOp>(op, op.getOutput().getType(),
+                                          ValueRange{op.getInput(), table});
 }
 
 } // namespace bm1684x

@@ -9,21 +9,37 @@
 //===----------------------------------------------------------------------===//
 
 #include "tpu_mlir/Dialect/Tpu/IR/TpuOps.h"
-// #include "tpu_mlir/Backend/BM168x/cv18xx.h"
-#include "tpu_mlir/Support/Helper/Quant.h"
-#include "tpu_mlir/Support/Helper/Module.h"
+#include "tpu_mlir/Backend/CV18xx/CV18xx.h"
+#include "tpu_mlir/Backend/CV18xx/CV18xx_global_api.h"
+#include "tpu_mlir/Support/Module.h"
 
-using namespace mlir;
-using namespace tpu_mlir;
-using namespace tpu_mlir::helper;
+#include "tpu_mlir/Support/MathUtils.h"
+
+
+
+using namespace tpu_mlir::backend;
+
+
+
 // using namespace tpu_mlir::backend;
 
 // =========================================
 // GlobalGenInterface
 // =========================================
 
-void tpu::ReluOp::codegen_global_cv18xx(void* ctx, int64_t layer_id) {
-  llvm_unreachable("Not supported now");
+void tpu::ReluOp::codegen_global_cv18xx( int64_t layer_id) {
+
+  gaddr_t ga_input = module::getAddress(getInput());
+  gaddr_t ga_output = module::getAddress(getOutput());
+  int64_t n, c, h, w;
+  module::getNCHW(getInput(), n, c, h, w);
+  if (module::isUniformQuantized(getOutput())) {
+    cvi_backend_tg_relu_kernel( layer_id, ga_input, ga_output,
+                                          n, c, h, w, CVK_FMT_I8);
+  } else {
+    cvi_backend_tg_relu_kernel( layer_id, ga_input, ga_output,
+                                          n, c, h, w, CVK_FMT_BF16);
+  }
 }
 
 // =========================================

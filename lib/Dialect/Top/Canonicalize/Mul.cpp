@@ -8,11 +8,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "tpu_mlir/Dialect/Top/IR/TopOps.h"
-
+#include "tpu_mlir/Support/Module.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
 
-using namespace mlir;
 using namespace tpu_mlir::top;
 
 struct MulToSiLU : public OpRewritePattern<MulOp> {
@@ -20,20 +19,22 @@ struct MulToSiLU : public OpRewritePattern<MulOp> {
 
   LogicalResult matchAndRewrite(MulOp op,
                                 PatternRewriter &rewriter) const override {
-    if (op.do_relu() || op.inputs().size() != 2) {
+    if (op.getDoRelu() || op.getInputs().size() != 2) {
       return failure();
     }
-    auto in0_op = op.inputs()[0].getDefiningOp();
-    auto in1_op = op.inputs()[1].getDefiningOp();
+    if (module::isUniformQuantized(op.getOutput()))
+      return failure();
+    auto in0_op = op.getInputs()[0].getDefiningOp();
+    auto in1_op = op.getInputs()[1].getDefiningOp();
     Value in_value;
     SigmoidOp sigmoid_op = dyn_cast<SigmoidOp>(in1_op);
-    if (sigmoid_op && sigmoid_op.input().getDefiningOp() == in0_op &&
+    if (sigmoid_op && sigmoid_op.getInput().getDefiningOp() == in0_op &&
         sigmoid_op->hasOneUse()) {
-      in_value = op.inputs()[0];
+      in_value = op.getInputs()[0];
     } else if ((sigmoid_op = dyn_cast<SigmoidOp>(in0_op)) &&
-               sigmoid_op.input().getDefiningOp() == in1_op &&
+               sigmoid_op.getInput().getDefiningOp() == in1_op &&
                sigmoid_op->hasOneUse()) {
-      in_value = op.inputs()[1];
+      in_value = op.getInputs()[1];
     } else {
       return failure();
     }

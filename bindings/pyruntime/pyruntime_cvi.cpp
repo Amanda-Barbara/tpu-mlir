@@ -103,7 +103,11 @@ struct PythonCviModel {
     for (int i = 0; i < input_num; i++) {
       inputs.push_back(std::make_shared<PythonTensor>(&input_tensors[i]));
     }
+
     for (int i = 0; i < output_num; i++) {
+      if (!output_tensors[i].name) {
+        continue;
+      }
       outputs.push_back(std::make_shared<PythonTensor>(&output_tensors[i]));
     }
   }

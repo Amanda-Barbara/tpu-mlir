@@ -10,6 +10,9 @@ if [ x$1 == x ]; then
 fi
 
 cfg_file=$REGRESSION_PATH/config/$1.cfg
+if [ x$2 != x ]; then
+  cfg_file=$2
+fi
 
 if [ ! -f $cfg_file ]; then
   echo "Error: can't open config file ${cfg_file}"
@@ -79,6 +82,10 @@ if [ x${pad_type} != x ]; then
   pad_type_opt="--pad_type=${pad_type}"
 fi
 
+debug_cmd_opt=
+if [ x${debug_cmd} != x ]; then
+  debug_cmd_opt="--debug_cmd=${debug_cmd}"
+fi
 test_input_opt=
 test_result_opt=
 test_innpz_opt=
@@ -103,14 +110,15 @@ model_transform.py \
   ${pixel_format_opt} \
   ${pad_value_opt} \
   ${pad_type_opt} \
+  ${debug_cmd_opt} \
   ${test_input_opt} \
   ${test_result_opt} \
   --mlir ${model_name}.mlir
 
 # only once
 CALI_TABLE=${REGRESSION_PATH}/cali_tables/${model_name}_cali_table
-if [ x$2 != x ]; then
-  CALI_TABLE=$2
+if [ x${specified_cali_table} != x ]; then
+  CALI_TABLE=${specified_cali_table}
 fi
 if [ ! -f ${CALI_TABLE} ]; then
   if [ x${dataset} == x ]; then

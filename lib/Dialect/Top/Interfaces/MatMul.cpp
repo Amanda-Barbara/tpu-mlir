@@ -9,62 +9,61 @@
 
 #include "tpu_mlir/Dialect/Top/IR/TopOps.h"
 #include "tpu_mlir/Support/Dnnl/Dnnl.h"
-#include "tpu_mlir/Support/Helper/Module.h"
-
-using namespace tpu_mlir;
-using namespace tpu_mlir::helper;
-using namespace mlir;
+#include "tpu_mlir/Support/Module.h"
 
 // clang-format off
 // case 1: [5, 6] * [6, 7] = [5, 7] => batch = 1, M = 5, K = 6, N = 7
 // case 2: [1, 512, 7, 7] * [25088, 4096] = [1, 4096] => batch = 1, M = 1, K = 25088, N = 4096
 // case 3: [3, 4, 5, 6] * [3, 4, 6, 7] = [3, 4, 5, 7] => batch = 12, M = 5, K = 6, N = 7
 // case 4: [4, 5, 6] * [6,7] = [4, 5, 7] => batch =1, M = 20, K = 6, N = 7
+// case 5: [4, 5, 6] * [6] = [4, 5] => batch =1, M = 20, K = 6, N = 1
 // clang-format on
-void top::MatMulOp::parseParam(int64_t &batch, int64_t &M, int64_t &K,
-                               int64_t &N, bool &with_bias, bool &relu,
-                               double &limit) {
-  auto a_s = Module::getShape(input());
-  auto b_s = Module::getShape(right());
-  auto o_s = Module::getShape(output());
-  with_bias = !bias().getType().isa<mlir::NoneType>();
-  relu = do_relu();
-  limit = this->relu_limit().convertToDouble();
+matmul_attr_t top::MatMulOp::parseParam() {
+  matmul_attr_t p = {0};
+  auto a_s = module::getShape(getInput());
+  auto b_s = SmallVector<int64_t>(module::getShape(getRight()));
+  auto o_s = SmallVector<int64_t>(module::getShape(getOutput()));
+  p.with_bias = !getBias().getType().isa<mlir::NoneType>();
+  p.do_relu = getDoRelu();
+  p.relu_limit = this->getReluLimit().convertToDouble();
   auto b_dims = b_s.size();
   auto o_dims = o_s.size();
-  assert(b_dims >= 2);
-  N = b_s[b_dims - 1];
-  assert(N == o_s[o_dims - 1]);
-  K = b_s[b_dims - 2];
-  batch = 1;
+  p.right_transpose = getRightTranspose();
+  if (b_dims == 1) {
+    assert(p.right_transpose == false);
+    b_s.push_back(1);
+    o_s.push_back(1);
+    b_dims += 1;
+    o_dims += 1;
+  }
+  p.N = p.right_transpose ? b_s[b_dims - 2] : b_s[b_dims - 1];
+  assert(p.N == o_s[o_dims - 1]);
+  p.K = p.right_transpose ? b_s[b_dims - 1] : b_s[b_dims - 2];
+  p.batch = 1;
   for (int i = 0; i < b_dims - 2; i++) {
-    batch *= b_s[i];
+    p.batch *= b_s[i];
   }
-  if (batch > 1 || o_dims <= 2) {
-    M = o_s[o_dims - 2];
+  if (p.batch > 1 || o_dims <= 2) {
+    p.M = o_s[o_dims - 2];
   } else {
-    M = std::accumulate(o_s.begin(), o_s.begin() + o_dims - 1, 1,
-                        std::multiplies<int64_t>());
+    p.M = std::accumulate(o_s.begin(), o_s.begin() + o_dims - 1, 1,
+                          std::multiplies<int64_t>());
   }
+  return p;
 }
 
 int64_t top::MatMulOp::getFLOPs() {
-  int64_t batch, M, K, N;
-  bool has_relu, with_bias;
-  double limit;
-  parseParam(batch, M, K, N, with_bias, has_relu, limit);
-  auto extra = with_bias ? 1 : 0 + has_relu ? 1 : 0;
-  return batch * (2 * K + extra) * N * M;
+  auto p = parseParam();
+  auto extra = p.with_bias ? 1 : 0 + p.do_relu ? 1 : 0;
+  return p.batch * (2 * p.K + extra) * p.N * p.M;
 }
 
 LogicalResult top::MatMulOp::init(InferenceParameter &p) {
   auto matmul = new MatMul();
-  int64_t batch, M, K, N;
-  bool with_bias, relu;
-  double limit;
-  parseParam(batch, M, K, N, with_bias, relu, limit);
-  matmul->setup(p.inputs[0], p.inputs[1], p.inputs[2], p.outputs[0], batch, M,
-                K, N, relu, limit, 0);
+  auto a = parseParam();
+  matmul->setup(p.inputs[0], p.inputs[1], p.inputs[2], p.outputs[0], a.batch,
+                a.M, a.K, a.N, a.do_relu, a.relu_limit, 0, a.right_transpose,
+                0);
   p.handle = (void *)matmul;
   return success();
 }

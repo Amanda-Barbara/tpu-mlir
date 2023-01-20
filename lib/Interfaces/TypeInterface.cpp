@@ -9,19 +9,16 @@
 
 #include "mlir/IR/BuiltinTypes.h"
 #include "tpu_mlir/Interfaces/TypeInterface.h"
-
-using namespace mlir;
-
 #include "tpu_mlir/Interfaces/TypeInterface.cpp.inc"
-#include "tpu_mlir/Support/Helper/Module.h"
-#include "tpu_mlir/Support/Helper/Quant.h"
+#include "tpu_mlir/Support/Module.h"
 
-using namespace tpu_mlir::helper;
+
+
 namespace tpu_mlir {
 
 bool type_need_cast(Type from, Type to) {
-  auto f_sType = Module::getStorageType(from);
-  auto t_sType = Module::getStorageType(to);
+  auto f_sType = module::getStorageType(from);
+  auto t_sType = module::getStorageType(to);
   if (f_sType == t_sType) {
     return false;
   }
@@ -34,7 +31,7 @@ bool type_need_cast(Type from, Type to) {
 }
 
 std::string type_string(mlir::Type type) {
-  auto t = Module::getStorageType(type);
+  auto t = module::getStorageType(type);
   std::string str;
   if (t.isF32()) {
     str = "f32";
@@ -64,14 +61,14 @@ static mlir::Type verifyCompatibleType(mlir::Value in, mlir::Type to,
     return do_nothing(mode);
   }
   // case: equal, do nothing
-  auto from_stype = Module::getStorageType(in);
-  auto to_stype = Module::getStorageType(to);
+  auto from_stype = module::getStorageType(in);
+  auto to_stype = module::getStorageType(to);
   if (false == type_need_cast(from_stype, to_stype)) {
     return do_nothing(mode);
   }
   // case: quantize
-  bool from_isQuant = Quant::isUniformQuantized(in);
-  bool to_isQuant = Quant::isUniformQuantized(to);
+  bool from_isQuant = module::isUniformQuantized(in);
+  bool to_isQuant = module::isUniformQuantized(to);
   if (to_isQuant && !from_stype.isIntOrIndex()) {
     mode = TypeCastMode::DO_QUANTIZE;
     return to_stype;
@@ -89,8 +86,14 @@ static mlir::Type verifyCompatibleType(mlir::Value in, mlir::Type to,
 
 mlir::Type type_verify_case_same(mlir::Operation *op, uint64_t opd_idx,
                                  TypeCastMode &mode) {
-  auto out = op->getResult(0);
-  return type_verify_case_type(op, opd_idx, out.getType(), mode);
+  mlir::Type toType;
+  for (auto t:op->getResultTypes()) {
+    if (!t.isa<mlir::NoneType>()) {
+      toType = t;
+      break;
+    }
+  }
+  return type_verify_case_type(op, opd_idx, toType, mode);
 }
 
 mlir::Type type_verify_case_type(mlir::Operation *op, uint64_t opd_idx,
@@ -108,8 +111,8 @@ mlir::Type type_verify_case_i32(mlir::Operation *op, uint64_t opd_idx,
   if (opd_idx == 0) {
     auto in = op->getOperand(opd_idx);
     auto out = op->getResult(0);
-    auto is_qtype = Quant::isUniformQuantized(in);
-    auto stype = Module::getStorageType(out);
+    auto is_qtype = module::isUniformQuantized(in);
+    auto stype = module::getStorageType(out);
     if (stype.isInteger(32)) {
       if (is_qtype) {
         return do_nothing(mode);

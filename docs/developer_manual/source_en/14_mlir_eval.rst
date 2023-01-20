@@ -10,14 +10,26 @@ The accuracy validation in TPU-MLIR is mainly for the mlir model, fp32 uses the 
 
 Metrics
 ~~~~~~~~~~~~
-Currently, the validation is mainly used for classification and object detection networks. The metrics for classification networks are Top-1 and Top-5 accuracy, while the object detection networks use 12 metrics of COCO, as shown in the figure (:ref:` coco_eval`). Generally, we record the Average Precision when IoU=0.5 (i.e., PASCAL VOC metric).
+Currently, the validation is mainly used for classification and object detection networks. The metrics for classification networks are Top-1 and Top-5 accuracy, while the object detection networks use 12 metrics of COCO, as shown below. Generally, we record the Average Precision when IoU=0.5 (i.e., PASCAL VOC metric).
 
-.. _coco_eval:
-.. figure:: ../assets/coco_eval.png
-   :height: 9.5cm
-   :align: center
+.. math::
 
-   COCO Evaluation Metrics
+   \boldsymbol{Average Precision (AP):} & \\
+   AP\quad & \text{\% AP at IoU=.50:.05:.95 (primary challenge metric)} \\
+   AP^{IoU}=.50\quad & \text{\% AP at IoU=.50 (PASCAL VOC metric)} \\
+   AP^{IoU}=.75\quad & \text{\% AP at IoU=.75 (strict metric)} \\
+   \boldsymbol{AP Across Scales:} & \\
+   AP^{small}\quad & \text{\% AP for small objects: $area < 32^2$} \\
+   AP^{medium}\quad & \text{\% AP for medium objects: $32^2 < area < 96^2$} \\
+   AP^{large}\quad & \text{\% AP for large objects: $area > 96^2$} \\
+   \boldsymbol{Average Recall (AR):} & \\
+   AR^{max=1}\quad & \text{\% AR given 1 detection per image} \\
+   AR^{max=10}\quad & \text{\% AR given 10 detections per image} \\
+   AR^{max=100}\quad & \text{\% AR given 100 detections per image} \\
+   \boldsymbol{AP Across Scales:} & \\
+   AP^{small}\quad & \text{\% AP for small objects: $area < 32^2$} \\
+   AP^{medium}\quad & \text{\% AP for medium objects: $32^2 < area < 96^2$} \\
+   AP^{large}\quad & \text{\% AP for large objects: $area > 96^2$}
 
 
 Datasets
@@ -31,7 +43,7 @@ Validation Interface
 
 TPU-MLIR provides the command for accuracy validation:
 
-.. code-block:: console
+.. code-block:: shell
 
     $ model_eval.py \
         --model_file mobilenet_v2.mlir \
@@ -84,24 +96,26 @@ mobilenet_v2
 
 2. Model Conversion
 
-   Use the model_transform.py interface to convert the original model to the mobilenet_v2.mlir model, and obtain the mobilenet_v2_cali_table through the run_calibration.py interface. Please refer to the "User Interface" chapter for specific usage. The INT8 model of the tpu layer is obtained by the following command:
+   Use the model_transform.py interface to convert the original model to the mobilenet_v2.mlir model, and obtain mobilenet_v2_cali_table through the run_calibration.py interface. Please refer to the "User Interface" chapter for specific usage. The INT8 model of the tpu layer is obtained through the command below. After running the command, an intermediate file named mobilenet_v2_bm1684x_int8_sym_tpu.mlir will be generated. We will use this intermediate file to validate the accuracy of the INT8 symmetric quantized model:
 
-.. code-block:: console
+.. code-block:: shell
 
     # INT8 Sym Model
-    $ tpuc-opt mobilenet_v2.mlir \
-        --import-calibration-table='file=mobilenet_v2_cali_table asymmetric=false' \
-        --convert-top-to-tpu="mode=INT8 asymmetric=false chip=bm1684x" \
-        --save-weight \
-        --canonicalize \
-        --mlir-print-debuginfo \
-        -o mobilenet_v2_tpu_int8_sym.mlir
+    $ model_deploy.py \
+       --mlir mobilenet_v2.mlir \
+       --quantize INT8 \
+       --calibration_table mobilenet_v2_cali_table \
+       --chip bm1684x \
+       --test_input mobilenet_v2_in_f32.npz \
+       --test_reference mobilenet_v2_top_outputs.npz \
+       --tolerance 0.95,0.69 \
+       --model mobilenet_v2_int8.bmodel
 
 3. Accuracy Validation
 
    Use the model_eval.py interface to validate:
 
-.. code-block:: console
+.. code-block:: shell
 
     # F32 model validation
     $ model_eval.py \
@@ -113,7 +127,7 @@ mobilenet_v2
 
     # INT8 sym model validation
     $ model_eval.py \
-        --model_file mobilenet_v2_tpu_int8_sym.mlir \
+        --model_file mobilenet_v2_bm1684x_int8_sym_tpu.mlir \
         --count 50000 \
         --dataset_type imagenet \
         --postprocess_type topx \
@@ -121,13 +135,13 @@ mobilenet_v2
 
 The accuracy validation results of the F32 model and the INT8 symmetric quantization model are as follows:
 
-.. code-block:: console
+.. code-block:: shell
 
     # mobilenet_v2.mlir validation result
     2022/11/08 01:30:29 - INFO : idx:50000, top1:0.710, top5:0.899
     INFO:root:idx:50000, top1:0.710, top5:0.899
 
-    # mobilenet_v2_tpu_int8_sym.mlir validation result
+    # mobilenet_v2_bm1684x_int8_sym_tpu.mlir validation result
     2022/11/08 05:43:27 - INFO : idx:50000, top1:0.702, top5:0.895
     INFO:root:idx:50000, top1:0.702, top5:0.895
 
@@ -146,7 +160,7 @@ yolov5s
 
    Use the model_eval.py interface to validate:
 
-.. code-block:: console
+.. code-block:: shell
 
     # F32 model validation
     $ model_eval.py \
@@ -159,7 +173,7 @@ yolov5s
 
     # INT8 sym model validation
     $ model_eval.py \
-        --model_file yolov5s_tpu_int8_sym.mlir \
+        --model_file yolov5s_bm1684x_int8_sym_tpu.mlir \
         --count 5000 \
         --dataset_type coco \
         --postprocess_type coco_mAP \
@@ -168,7 +182,7 @@ yolov5s
 
 The accuracy validation results of the F32 model and the INT8 symmetric quantization model are as follows:
 
-.. code-block:: console
+.. code-block:: shell
 
     # yolov5s.mlir validation result
     Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.369
@@ -184,7 +198,7 @@ The accuracy validation results of the F32 model and the INT8 symmetric quantiza
     Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.602
     Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.670
 
-    # yolov5s_tpu_int8_sym.mlir validation result
+    # yolov5s_bm1684x_int8_sym_tpu.mlir validation result
     Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.337
     Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.544
     Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.365

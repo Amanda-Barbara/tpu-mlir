@@ -26,12 +26,15 @@ void Deconv::pad_init(float *input, deconv_attr_t &attr, int izp) {
   origin_input = input;
   _izp = izp;
   memcpy(&_attrs, &attr, sizeof(deconv_attr_t));
-  if (izp && (attr.pad_d > 0 || attr.pad_d_after > 0 || attr.pad_h > 0 ||
-              attr.pad_h_after > 0 || attr.pad_w > 0 || attr.pad_w_after > 0)) {
-    src_shape = {attr.n, attr.ic,
-                 (attr.id - 1) * attr.sd + 1 + attr.dd * (attr.kd - 1),
-                 (attr.ih - 1) * attr.sh + 1 + attr.dh * (attr.kh - 1),
-                 (attr.iw - 1) * attr.sw + 1 + attr.dw * (attr.kw - 1)};
+  if (izp) {
+    src_shape = {
+        attr.n, attr.ic,
+        (attr.id - 1) * attr.sd + 1 +
+            attr.dd * (2 * attr.kd - 2 - attr.pad_d - attr.pad_d_after),
+        (attr.ih - 1) * attr.sh + 1 +
+            attr.dh * (2 * attr.kh - 2 - attr.pad_h - attr.pad_h_after),
+        (attr.iw - 1) * attr.sw + 1 +
+            attr.dw * (2 * attr.kw - 2 - attr.pad_w - attr.pad_w_after)};
     int input_padded_size = src_shape[0] * src_shape[1] * src_shape[2] *
                             src_shape[3] * src_shape[4];
     input_after_pad = std::make_shared<std::vector<float>>(input_padded_size);
@@ -47,9 +50,10 @@ void Deconv::pad_init(float *input, deconv_attr_t &attr, int izp) {
 }
 
 void Deconv::setup(float *input, float *weight, float *bias, float *output,
-                   deconv_attr_t &attr, int izp) {
+                   const deconv_attr_t &attr_, int izp) {
   // printf("Conv para:%d,%d,%d,%d,%d,%d,%d,%d\n", idt, wdt, bdt, odt,
   // per_channel, izp, ozp, do_relu);
+  auto attr = attr_;
   this->kd = attr.kd;
   this->kh = attr.kh;
   this->kw = attr.kw;
@@ -187,10 +191,16 @@ void Deconv::setup(float *input, float *weight, float *bias, float *output,
 
     if (attr.do_relu) {
       const float ops_scale = 1.f;
-      const float ops_alpha = 0.f; // relu negative slope
+      float ops_alpha = 0.f; // relu negative slope
       const float ops_beta = 0.f;
-      ops.append_eltwise(ops_scale, algorithm::eltwise_relu, ops_alpha,
-                         ops_beta);
+      if (attr.relu_limit > 0.f) {
+        ops_alpha = attr.relu_limit;
+        ops.append_eltwise(ops_scale, algorithm::eltwise_bounded_relu,
+                           ops_alpha, ops_beta);
+      } else {
+        ops.append_eltwise(ops_scale, algorithm::eltwise_relu, ops_alpha,
+                           ops_beta);
+      }
       deconv_attr.set_post_ops(ops);
     }
 

@@ -14,7 +14,7 @@ Other complex cases such as image input with preprocessing and multiple inputs a
 
 TFLite model conversion is also supported, with the following command:
 
-.. code-block:: console
+.. code-block:: shell
 
     # TFLite conversion example
     $ model_transform.py \
@@ -39,7 +39,7 @@ TFLite model conversion is also supported, with the following command:
 
 Supporting the conversion of Caffe models, the commands are as follows:
 
-.. code-block:: console
+.. code-block:: shell
 
     # Caffe conversion example
     $ model_transform.py \
@@ -193,22 +193,19 @@ Convert the mlir file into the corresponding model, the parameters are as follow
      - Quantization type (F32/F16/BF16/INT8)
    * - chip
      - Y
-     - The platform that the model will use. Currently only bm1684x is supported. More TPU platforms will be supported in the future
+     - The platform that the model will use. Support bm1684x/bm1684/cv183x/cv182x/cv181x/cv180x.
    * - calibration_table
      - N
      - The quantization table path. Required when it is INT8 quantization
    * - tolerance
      - N
      - Tolerance for the minimum similarity between MLIR quantized and MLIR fp32 inference results
-   * - correctness
-     - N
-     - Tolerance for the minimum similarity between simulator and MLIR quantized inference results. 0.99,0.90 by default
    * - test_input
      - N
      - The input file for validation, which can be an image, npy or npz. No validation will be carried out if it is not specified
    * - test_reference
      - N
-     - Reference data for validating model correctness (in npz format). It is the result of each operator
+     - Reference data for validating mlir tolerance (in npz format). It is the result of each operator
    * - excepts
      - N
      - Names of network layers that need to be excluded from validation. Separated by comma
@@ -228,7 +225,7 @@ Model inference. bmodel/mlir/onnx/tflite supported.
 
 Example:
 
-.. code-block:: console
+.. code-block:: shell
 
    $ model_runner.py \
       --input sample_in_f32.npz \
@@ -262,7 +259,7 @@ npz will be widely used in TPU-MLIR project for saving input and output results,
 
 Example:
 
-.. code-block:: console
+.. code-block:: shell
 
    # Check the output data in sample_out.npz
    $ npz_tool.py dump sample_out.npz output

@@ -17,12 +17,31 @@ using namespace mlir;
 namespace tpu_mlir {
 namespace tpu {
 
-struct StripInputQuantPattern : public OpRewritePattern<tpu::CastOp> {
-  StripInputQuantPattern(MLIRContext *context)
+struct StripInputQuantTpuCastPattern : public OpRewritePattern<tpu::CastOp> {
+  StripInputQuantTpuCastPattern(MLIRContext *context)
       : OpRewritePattern<tpu::CastOp>(context) {}
   LogicalResult matchAndRewrite(tpu::CastOp op,
                                 PatternRewriter &rewriter) const override {
-    if (auto inputOp = op.input().getDefiningOp<top::InputOp>()) {
+    if (auto inputOp = op.getInput().getDefiningOp<top::InputOp>()) {
+      if (!inputOp.getResult().hasOneUse())
+        return failure();
+      inputOp.getResult().setType(op.getResult().getType());
+      rewriter.replaceOp(op, inputOp.getResult());
+      return success();
+    }
+    return failure();
+  };
+};
+struct StripInputQuantCpuCastPattern
+    : public OpRewritePattern<tpu::GenericCpuOp> {
+  StripInputQuantCpuCastPattern(MLIRContext *context)
+      : OpRewritePattern<tpu::GenericCpuOp>(context) {}
+  LogicalResult matchAndRewrite(tpu::GenericCpuOp op,
+                                PatternRewriter &rewriter) const override {
+    if (op.getCpuOpName() != "quant") {
+      return failure();
+    }
+    if (auto inputOp = op.getInputs()[0].getDefiningOp<top::InputOp>()) {
       if (!inputOp.getResult().hasOneUse())
         return failure();
       inputOp.getResult().setType(op.getResult().getType());
@@ -33,15 +52,31 @@ struct StripInputQuantPattern : public OpRewritePattern<tpu::CastOp> {
   };
 };
 
-struct StripOutputQuantPattern : public OpRewritePattern<tpu::CastOp> {
-  StripOutputQuantPattern(MLIRContext *context)
+struct StripOutputQuantTpuCastPattern : public OpRewritePattern<tpu::CastOp> {
+  StripOutputQuantTpuCastPattern(MLIRContext *context)
       : OpRewritePattern<tpu::CastOp>(context) {}
   LogicalResult matchAndRewrite(tpu::CastOp op,
                                 PatternRewriter &rewriter) const override {
 
-    if (op.output().hasOneUse() &&
-        isa<ReturnOp>(op.output().use_begin().getUser())) {
-      rewriter.replaceOp(op, op.input());
+    if (op.getOutput().hasOneUse() &&
+        isa<ReturnOp>(op.getOutput().use_begin().getUser())) {
+      rewriter.replaceOp(op, op.getInput());
+      return success();
+    }
+    return failure();
+  };
+};
+
+struct StripOutputQuantCpuCastPattern
+    : public OpRewritePattern<tpu::GenericCpuOp> {
+  StripOutputQuantCpuCastPattern(MLIRContext *context)
+      : OpRewritePattern<tpu::GenericCpuOp>(context) {}
+  LogicalResult matchAndRewrite(tpu::GenericCpuOp op,
+                                PatternRewriter &rewriter) const override {
+
+    if (op.getOutput().hasOneUse() &&
+        isa<ReturnOp>(op.getOutput().use_begin().getUser())) {
+      rewriter.replaceOp(op, op.getInputs()[0]);
       return success();
     }
     return failure();
@@ -52,22 +87,23 @@ class StripIOQuantPass : public StripIOQuantBase<StripIOQuantPass> {
 public:
   StripIOQuantPass() {}
   void runOnOperation() override {
-    auto func = getOperation();
-    if (func.getName() != "main") {
-      return;
-    }
+    auto func = module::getMainFuncOp();
     auto ctx = func.getContext();
     RewritePatternSet patterns(ctx);
-    if (quant_input)
-      patterns.add<StripInputQuantPattern>(ctx);
-    if (quant_output)
-      patterns.add<StripOutputQuantPattern>(ctx);
+    if (quant_input) {
+      patterns.add<StripInputQuantTpuCastPattern>(ctx);
+      patterns.add<StripInputQuantCpuCastPattern>(ctx);
+    }
+    if (quant_output) {
+      patterns.add<StripOutputQuantTpuCastPattern>(ctx);
+      patterns.add<StripOutputQuantCpuCastPattern>(ctx);
+    }
     applyPatternsAndFoldGreedily(func, std::move(patterns));
-    Module::updateModuleTypes(Module::getModuleOp(func));
+    module::updateModuleTypes();
   }
 };
 
-std::unique_ptr<OperationPass<FuncOp>> createStripIOQuant() {
+std::unique_ptr<OperationPass<ModuleOp>> createStripIOQuant() {
   return std::make_unique<StripIOQuantPass>();
 }
 } // namespace tpu

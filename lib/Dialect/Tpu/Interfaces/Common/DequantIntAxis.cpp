@@ -9,13 +9,11 @@
 
 #include "tpu_mlir/Dialect/Tpu/IR/TpuOps.h"
 #include "tpu_mlir/Support/Dnnl/Dnnl.h"
-#include "tpu_mlir/Support/Helper/Module.h"
-#include "tpu_mlir/Support/Helper/Quant.h"
+#include "tpu_mlir/Support/Module.h"
+
 #include "tpu_mlir/Support/MathUtils.h"
 
-using namespace tpu_mlir;
-using namespace tpu_mlir::helper;
-using namespace mlir;
+
 
 LogicalResult tpu::DequantIntAxisOp::init(InferenceParameter &p) {
   return success();
@@ -23,12 +21,12 @@ LogicalResult tpu::DequantIntAxisOp::init(InferenceParameter &p) {
 void tpu::DequantIntAxisOp::deinit(InferenceParameter &p) {}
 
 LogicalResult tpu::DequantIntAxisOp::inference(InferenceParameter &p) {
-  auto i_sType = Module::getStorageType(input());
-  auto o_sType = Module::getStorageType(output());
-  auto o_qtype = Quant::getUniformQuantizedType(output());
+  auto i_sType = module::getStorageType(getInput());
+  auto o_sType = module::getStorageType(getOutput());
+  auto o_qtype = module::getUniformQuantizedType(getOutput());
 
-  auto shape = Module::getShape(output());
-  auto mode = quant_mode();
+  auto shape = module::getShape(getOutput());
+  auto mode = getQuantMode();
   int64_t inner = 1;
   for (int i = 2; i < shape.size(); ++i) {
     inner *= shape[i];
@@ -50,10 +48,9 @@ LogicalResult tpu::DequantIntAxisOp::inference(InferenceParameter &p) {
       }
     }
   } else if (mode == DequantMode::TFlite) {
-    int64_t lshift_val = lshift();
+    int64_t lshift_val = getLshift();
 #pragma omp parallel for schedule(static, omp_schedule(shape[1]))
     for (int c = 0; c < shape[1]; ++c) {
-      int64_t multi = p.inputs[1][c * 3];
       int64_t shift_val = p.inputs[1][c * 3 + 1];
       int64_t zero_point = p.inputs[1][c * 3 + 2];
       for (int n = 0; n < shape[0]; ++n) {
@@ -76,7 +73,7 @@ mlir::Type tpu::DequantIntAxisOp::type_verify(uint64_t opd_idx,
                                               TypeCastMode &mode) {
   if (opd_idx == 0) {
     auto op = getOperation();
-    auto stype = Module::getStorageType(input());
+    auto stype = module::getStorageType(getInput());
     if (stype.isIntOrIndex()) {
       return do_nothing(mode);
     }

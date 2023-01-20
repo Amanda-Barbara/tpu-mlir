@@ -9,62 +9,58 @@
 
 #include "tpu_mlir/Dialect/Tpu/IR/TpuOps.h"
 #include "tpu_mlir/Support/Dnnl/Dnnl.h"
-#include "tpu_mlir/Support/Helper/Module.h"
-#include "tpu_mlir/Support/Helper/Quant.h"
-#include "tpu_mlir/Support/MathUtils.h"
 #include "tpu_mlir/Support/Float16.h"
+#include "tpu_mlir/Support/Module.h"
 
-using namespace tpu_mlir;
-using namespace tpu_mlir::helper;
-using namespace mlir;
+#include "tpu_mlir/Support/MathUtils.h"
 
-void tpu::DeconvOp::parseParam(void *param) {
-  deconv_attr_t *p = (deconv_attr_t *)param;
-  memset(p, 0, sizeof(deconv_attr_t));
-  p->id = 1;
-  p->od = 1;
-  p->kd = 1;
-  p->sd = 1;
-  p->dd = 1;
-  auto ishape = input().getType().dyn_cast<RankedTensorType>().getShape();
-  auto oshape = output().getType().dyn_cast<RankedTensorType>().getShape();
-  Module::getNCHW(ishape, p->n, p->ic, p->ih, p->iw);
-  Module::getNCHW(oshape, p->n, p->oc, p->oh, p->ow);
 
-  auto kernel = Module::getI64Array(kernel_shape());
-  p->kh = kernel->at(0);
-  p->kw = kernel->at(1);
-  auto stride = Module::getI64Array(strides());
-  p->sh = stride->at(0);
-  p->sw = stride->at(1);
-  auto pad = Module::getI64Array(pads());
-  p->pad_h = pad->at(0);
-  p->pad_w = pad->at(1);
-  p->pad_h_after = pad->at(2);
-  p->pad_w_after = pad->at(3);
-  auto dilation = Module::getI64Array(dilations(), 2, 1);
-  p->dh = dilation->at(0);
-  p->dw = dilation->at(1);
-  auto ins = Module::getI64Array(inserts(), 2, 0);
-  p->ins_h = ins->at(0);
-  p->ins_w = ins->at(1);
-  p->g = group();
-  p->do_relu = do_relu();
-  p->relu_limit = relu_limit().convertToDouble();
-  p->with_bias = with_bias();
-  p->is_dw = (p->oc == p->ic && p->oc == p->g && p->g > 1);
-  return;
+
+deconv_attr_t tpu::DeconvOp::parseParam() {
+  deconv_attr_t p = {0};
+  p.id = 1;
+  p.od = 1;
+  p.kd = 1;
+  p.sd = 1;
+  p.dd = 1;
+  auto ishape = getInput().getType().dyn_cast<RankedTensorType>().getShape();
+  auto oshape = getOutput().getType().dyn_cast<RankedTensorType>().getShape();
+  module::getNCHW(ishape, p.n, p.ic, p.ih, p.iw);
+  module::getNCHW(oshape, p.n, p.oc, p.oh, p.ow);
+
+  auto kernel = module::getI64Array(getKernelShape());
+  p.kh = kernel->at(0);
+  p.kw = kernel->at(1);
+  auto stride = module::getI64Array(getStrides());
+  p.sh = stride->at(0);
+  p.sw = stride->at(1);
+  auto pad = module::getI64Array(getPads());
+  p.pad_h = pad->at(0);
+  p.pad_w = pad->at(1);
+  p.pad_h_after = pad->at(2);
+  p.pad_w_after = pad->at(3);
+  auto dilation = module::getI64Array(getDilations(), 2, 1);
+  p.dh = dilation->at(0);
+  p.dw = dilation->at(1);
+  auto ins = module::getI64Array(getInserts(), 2, 0);
+  p.ins_h = ins->at(0);
+  p.ins_w = ins->at(1);
+  p.g = getGroup();
+  p.do_relu = getDoRelu();
+  p.relu_limit = getReluLimit().convertToDouble();
+  p.with_bias = getWithBias();
+  p.is_dw = (p.oc == p.ic && p.oc == p.g && p.g > 1);
+  return p;
 }
 
 LogicalResult tpu::DeconvOp::init(InferenceParameter &p) {
   auto deconv = new Deconv();
-  deconv_attr_t attrs;
-  parseParam(&attrs);
+  auto attr = parseParam();
   int izp = 0;
-  if (Quant::isUniformQuantized(input())) {
-    izp = Quant::getUniformQuantizedType(input()).getZeroPoint();
+  if (module::isUniformQuantized(getInput())) {
+    izp = module::getUniformQuantizedType(getInput()).getZeroPoint();
   }
-  deconv->setup(p.inputs[0], p.inputs[1], p.inputs[2], p.outputs[0], attrs, izp);
+  deconv->setup(p.inputs[0], p.inputs[1], p.inputs[2], p.outputs[0], attr, izp);
   p.handle = (void *)deconv;
   return success();
 }
@@ -83,36 +79,98 @@ LogicalResult tpu::DeconvOp::inference(InferenceParameter &p) {
   }
   auto deconv = (Deconv *)p.handle;
   deconv->run();
+  bool is_cv18xx = module::isCV18xx();
   // requant
-  auto out_type = Module::getStorageType(output());
-  auto num_elem = Module::getNumElements(output());
+  auto out_type = module::getStorageType(getOutput());
+  auto num_elem = module::getNumElements(getOutput());
   if (out_type.isa<FloatType>()) {
     if (out_type.isBF16()) {
-      f32_to_bf16(p.outputs[0], p.outputs[0], num_elem);
+      BF16(p.outputs[0], p.outputs[0], num_elem);
     } else if (out_type.isF16()) {
-      f32_to_f16(p.outputs[0], p.outputs[0], num_elem);
+      F16(p.outputs[0], p.outputs[0], num_elem);
+    }
+  } else if (is_cv18xx && module::isUniformQuantized(getOutput())) {
+    // apply multiplier && rshift inplace
+    int64_t n, c, h, w;
+    module::getNCHW(getOutput(), n, c, h, w);
+    auto rshift_v = module::getI64Array(getRshift().value());
+    auto multiplier_v = module::getI64Array(getMultiplier().value());
+    assert(rshift_v->size() == c && "CV18xx must be per_axis.");
+#pragma omp parallel for schedule(static, omp_schedule(c))
+    for (int oc = 0; oc < c; oc++) {
+      int64_t shift = rshift_v->at(oc);
+      int64_t multi = multiplier_v->at(oc);
+      for (int on = 0; on < n; on++) {
+        for (int hw = 0; hw < h * w; hw++) {
+          int offset = (on * c + oc) * h * w + hw;
+          int64_t v = 0;
+          v = applyMultiplierAndRShift(p.outputs[0][offset], multi, shift,
+                                       CVI_QDM_QUANT);
+          p.outputs[0][offset] = to_int8(v);
+        }
+      }
     }
   }
 
   return success();
 }
 
+Optional<SmallVector<float, 4>>
+tpu_mlir::DeconvSlice(int64_t out_idx, int64_t out_slice, int64_t stride,
+                      int64_t filter, int64_t pad) {
+  // Define y as the output space, x as the input space.
+  // y should satisfy the constrain:
+  // y \in {x | Union [x_i * stride, x_i * stride + filter)}
+  // define: x_l, x_u: the lower and upper bound of x space.
+  //         x_range = x_u - x_l + 1
+  //         x_start = x_l
+  //  x \in [x_l, x_u]
+
+  // x_l * stride <= y < x_u * stride + filter
+  // x_u * stride <= y_max
+  // assert (x_l - 1) * stride + filter <= y_min
+  // assert x_l * stride + filter > y_min
+  // assert (x_u + 1) * stride > y_max
+
+  // The solution to those inequations is the valid space of x and y.
+
+  float pad_f, pad_e, x_l, x_u;
+  float y_min = out_idx + pad, y_max = y_min + out_slice - 1; // closed interval
+
+  x_l = std::floor(y_min / stride);
+  x_l = std::min(std::floor(std::max(y_min - filter, float(0)) / stride) + 1,
+                 x_l);
+  if (x_l * stride + filter <= y_min)
+    return {};
+
+  x_u = std::floor(y_max / stride);
+  x_u = std::max(std::ceil((y_max - filter) / stride), x_u);
+  if ((x_u + 1) * stride <= y_max)
+    return {};
+
+  pad_f = std::max(x_l * stride + filter - y_min - 1, float(0));
+  pad_e = std::max(y_max - x_u * stride, float(0));
+
+  assert(pad_f < filter);
+  assert(pad_e < filter);
+  return Optional<SmallVector<float, 4>>({pad_f, pad_e, x_l, x_u - x_l + 1});
+}
+
 LogicalResult tpu::DeconvOp::BackwardH(int64_t &in_idx, int64_t &in_slice,
-                                     int64_t out_idx, int64_t out_slice) {
-  deconv_attr_t attrs;
-  parseParam(&attrs);
-  int kh_ext = (attrs.kh - 1) * attrs.dh + 1;
-  int pad_h = kh_ext - attrs.pad_h - 1;
-  in_idx = out_idx - attrs.pad_h;
-  in_idx = in_idx <= 0 ? in_idx : std::ceil((float)in_idx / attrs.sh);
-  if (in_idx <= 0) {
-    pad_h = -in_idx;
-    in_slice = std::ceil((out_slice - pad_h + kh_ext - 1) / (float)(attrs.sh)) + pad_h;
+                                       int64_t out_idx, int64_t out_slice) {
+  auto &attr = getDeconvParam(*this);
+  int kh_ext = (attr.kh - 1) * attr.dh + 1;
+  if (auto ret = DeconvSlice(out_idx, out_slice, attr.sh, kh_ext, attr.pad_h)) {
+    in_idx = ret.value()[2];
+    in_slice = ret.value()[3];
   } else {
-    pad_h = in_idx * attrs.sh + pad_h - out_idx;
-    in_slice = std::ceil((out_slice - pad_h + kh_ext - 1) / (float)attrs.sh);
+    return failure();
   }
-  LocalGenInterface::fixSlice(in_idx, in_slice, attrs.ih);
+
+  bool is_last = (out_idx + out_slice == attr.oh);
+  LocalGenInterface::fixSlice(in_idx, in_slice, attr.ih, is_last);
+  if (in_slice == 0)
+    return failure();
   return success();
 }
 

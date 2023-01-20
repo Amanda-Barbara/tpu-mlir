@@ -28,12 +28,20 @@ def LayerGroup : Pass<"layer-group", "FuncOp"> {
   let summary = "convert to layer group in tpu by tpuc-opt";
   let constructor = "createLayerGroupPass()";
   let dependentDialects = ["TpuDialect"];
+  let options = [
+    Option<"opt", "opt", "int64_t", /*default=*/"2",
+           "opt=1: group layers as many as possible. opt=2: dynamic programming layer group">,
+  ];
 }
 
 def AddressAssign : Pass<"address-assign", "ModuleOp"> {
   let summary = "assign address for BM168x in tpu by tpuc-opt";
   let constructor = "createAddressAssignPass()";
   let dependentDialects = ["TpuDialect"];
+  let options = [
+    Option<"reuse_addr", "reuse_addr", "bool", /*default=*/"true",
+           "reuse tensor memory.">,
+  ];
 }
 
 def Codegen : Pass<"codegen", "ModuleOp"> {
@@ -46,12 +54,6 @@ def Codegen : Pass<"codegen", "ModuleOp"> {
   ];
 }
 
-def CVAddressAssign : Pass<"cv-address-assign", "ModuleOp"> {
-  let summary = "assign address CV18xx in tpu by tpuc-opt";
-  let constructor = "createCVAddressAssignPass()";
-  let dependentDialects = ["TpuDialect"];
-}
-
 def CVCodegen : Pass<"cv-codegen", "ModuleOp"> {
   let summary = "codegen for CV18xx in tpu by tpuc-opt";
   let constructor = "createCVCodegenPass()";
@@ -62,7 +64,7 @@ def CVCodegen : Pass<"cv-codegen", "ModuleOp"> {
   ];
 }
 
-def StripIOQuant : Pass<"strip-io-quant", "FuncOp"> {
+def StripIOQuant : Pass<"strip-io-quant", "ModuleOp"> {
   let summary = "remove input & output fp32<->int8 converiton in int8model";
   let constructor = "createStripIOQuant()";
   let dependentDialects = ["TpuDialect"];
@@ -74,4 +76,19 @@ def StripIOQuant : Pass<"strip-io-quant", "FuncOp"> {
   ];
 }
 
+def ConvertReluLimit : Pass<"convert-relu-limit", "FuncOp"> {
+  let summary = "convert relu_limit != -1 to clip for cv18xx in tpu by tpuc-opt";
+  let constructor = "createConvertReluLimit()";
+  let dependentDialects = ["TpuDialect"];
+}
+
+def DynCodegen : Pass<"dyn_codegen", "ModuleOp"> {
+  let summary = "dynamic codegen for BM168x in tpu by tpuc-opt";
+  let constructor = "createDynCodegenPass()";
+  let dependentDialects = ["TpuDialect"];
+  let options = [
+    Option<"model_file", "model_file", "std::string", /*default=*/"",
+           "save to model file">,
+  ];
+}
 #endif

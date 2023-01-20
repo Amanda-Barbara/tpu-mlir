@@ -36,8 +36,14 @@ def LocalGenInterface : OpInterface<"LocalGenInterface"> {
       InterfaceMethod<
         /*desc=*/[{}],
         /*retType=*/"void",
+        /*methodName=*/"assign_sec_info",
+        /*args=*/(ins "int64_t":$n_step, "int64_t":$h_step, "void *":$sec_info_)
+      >,
+      InterfaceMethod<
+        /*desc=*/[{}],
+        /*retType=*/"void",
         /*methodName=*/"codegen_local_bm1684x",
-        /*args=*/(ins "int64_t":$n_step, "int64_t":$h_step)
+        /*args=*/(ins "int64_t":$n_step, "int64_t":$h_step, "void *":$sec_info_)
       >,
       InterfaceMethod<
         /*desc=*/[{}],
@@ -112,16 +118,13 @@ def LocalGenInterface : OpInterface<"LocalGenInterface"> {
                       "int64_t":$out_nslice, "int64_t":$out_hslice),
         [{}],
         [{
-          auto module = Module::getModuleOp($_op);
-          auto chip = Module::getChip(module);
-          if (chip == Module::Chip::BM1684) {
+          if (module::isBM1684Family()) {
             return $_op.getBufferSize_bm1684(in_lmem_bytes, out_lmem_bytes,
                                              in_nslice, in_hslice, out_nslice, out_hslice);
-          } else if (chip == Module::Chip::BM1684x) {
+          } else if (module::isBM1684XFamily()) {
             return $_op.getBufferSize_bm1684x(in_lmem_bytes, out_lmem_bytes,
                                               in_nslice, in_hslice, out_nslice, out_hslice);
-          } else if (chip == Module::Chip::CV182x
-                     || chip == Module::Chip::CV183x) {
+          } else if (module::isCV18xx()) {
             return $_op.getBufferSize_cv18xx(in_lmem_bytes, out_lmem_bytes,
                                               in_nslice, in_hslice, out_nslice, out_hslice);
           }
@@ -130,8 +133,8 @@ def LocalGenInterface : OpInterface<"LocalGenInterface"> {
       >,
   ];
   let extraClassDeclaration = [{
-  static constexpr llvm::StringRef kLayerGroupAttrName = "group_info";
-  static void fixSlice(int64_t &in_idx, int64_t &in_slice, int64_t in_length);
+  static constexpr llvm::StringRef kLayerGroupAttrName = "ginfo";
+  static void fixSlice(int64_t &in_idx, int64_t &in_slice, int64_t in_length, bool last = false);
   static tpu_mlir::group_info_t getGroupInfo(mlir::Operation * op, int64_t n_step = 0, int64_t h_step = 0);
   static tpu_mlir::group_info_t getGroupInfo(mlir::Value, int64_t n_step = 0, int64_t h_step = 0);
   }];

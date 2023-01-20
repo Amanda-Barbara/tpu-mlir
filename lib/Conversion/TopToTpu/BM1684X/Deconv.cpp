@@ -14,7 +14,6 @@ namespace bm1684x {
 
 void DeconvLowering::LoweringF32(PatternRewriter &rewriter,
                                  top::DeconvOp deconvOp) const {
-  auto ctx = getContext();
   auto op = deconvOp.getOperation();
   std::vector<Value> operands;
   const int nInputs = op->getNumOperands();
@@ -25,44 +24,46 @@ void DeconvLowering::LoweringF32(PatternRewriter &rewriter,
   for (auto &attr : op->getAttrs()) {
     attrs.push_back(attr);
   }
-  bool with_bias = !deconvOp.bias().getType().isa<mlir::NoneType>();
+  bool with_bias = !deconvOp.getBias().getType().isa<mlir::NoneType>();
   attrs.push_back(
       rewriter.getNamedAttr("with_bias", rewriter.getBoolAttr(with_bias)));
 
-  rewriter.replaceOpWithNewOp<tpu::DeconvOp>(op, deconvOp.output().getType(),
+  rewriter.replaceOpWithNewOp<tpu::DeconvOp>(op, deconvOp.getOutput().getType(),
                                              operands, attrs);
 }
-
+void DeconvLowering::LoweringINT4(PatternRewriter &rewriter, top::DeconvOp op,
+                                  bool asymmetric) const {
+  LoweringINT8(rewriter, op, asymmetric);
+}
 void DeconvLowering::LoweringINT8(PatternRewriter &rewriter, top::DeconvOp op,
                                   bool asymmetric) const {
-  deconv_attr_t param;
-  op.parseParam(&param);
+  auto param = op.parseParam();
   rewriter.setInsertionPointAfter(op);
   std::vector<Value> operands;
-  operands.push_back(op.input());
+  operands.push_back(op.getInput());
   // in/out scale/zp
   double in_scale, out_scale;
   int64_t in_zp, out_zp;
-  Quant::getScaleAndZeroPoint(op.input(), in_scale, in_zp, asymmetric);
-  Quant::getScaleAndZeroPoint(op.output(), out_scale, out_zp, asymmetric);
+  module::getScaleAndZeroPoint(op.getInput(), in_scale, in_zp, asymmetric);
+  module::getScaleAndZeroPoint(op.getOutput(), out_scale, out_zp, asymmetric);
   // filter
-  auto filterOp = cast<top::WeightOp>(op.filter().getDefiningOp());
+  auto filterOp = cast<top::WeightOp>(op.getFilter().getDefiningOp());
   auto filter_f32 = filterOp.read<float>();
   float fmax, fmin;
   findMinMax(filter_f32->data(), filter_f32->size(), &fmin, &fmax);
   bool fsign = (fmin < 0 || param.with_bias == true);
   float fqmax = fsign ? 127 : 255;
-  std::shared_ptr<std::vector<double>> weight_scale_v;
-  if (filterOp.weight_scale().has_value() && weight_scale_v->size()) {
-    weight_scale_v = Module::getF64Array(filterOp.weight_scale().value());
+  f64_array_t weight_scale_v;
+  if (filterOp.getScale().has_value() && weight_scale_v->size()) {
+    weight_scale_v = module::getF64Array(filterOp.getScale().value());
   }
 
-  std::shared_ptr<std::vector<int32_t>> bias_int32;
+  i32_array_t bias_int32;
   std::shared_ptr<std::vector<float>> bias_fp32;
   auto filter_i8 = std::make_shared<std::vector<int8_t>>(filter_f32->size());
   auto filter_u8 = std::make_shared<std::vector<uint8_t>>(filter_f32->size());
   if (param.with_bias) {
-    auto biasOp = cast<top::WeightOp>(op.bias().getDefiningOp());
+    auto biasOp = cast<top::WeightOp>(op.getBias().getDefiningOp());
     bias_fp32 = biasOp.read<float>();
     bias_int32 = std::make_shared<std::vector<int32_t>>(bias_fp32->size());
   } else if (in_zp) {
@@ -73,7 +74,7 @@ void DeconvLowering::LoweringINT8(PatternRewriter &rewriter, top::DeconvOp op,
   int inner_dim = filter_f32->size() / param.oc;
   for (int c = 0; c < param.oc; c++) { // per-channel量化
     float *p_filter = filter_f32->data() + c * inner_dim;
-    if (filterOp.weight_scale().has_value()) {
+    if (filterOp.getScale().has_value()) {
       scale_w = weight_scale_v->data()[c];
     } else {
       float w_max = findMaxabs(p_filter, inner_dim);
@@ -82,12 +83,12 @@ void DeconvLowering::LoweringINT8(PatternRewriter &rewriter, top::DeconvOp op,
     if (fsign) {
       for (int t = 0; t < inner_dim; t++) {
         filter_i8->data()[c * inner_dim + t] =
-            Quant::to_int8(p_filter[t] / scale_w);
+            to_int8(p_filter[t] / scale_w);
       }
     } else {
       for (int t = 0; t < inner_dim; t++) {
         filter_u8->data()[c * inner_dim + t] =
-            Quant::to_uint8(p_filter[t] / scale_w);
+            to_uint8(p_filter[t] / scale_w);
       }
     }
 
@@ -105,9 +106,9 @@ void DeconvLowering::LoweringINT8(PatternRewriter &rewriter, top::DeconvOp op,
       bias_int32->data()[c] = std::round(-bias_w_xz);
     }
   }
-  param.with_bias = (bias_int32 != nullptr);
+  bool with_bias = (bias_int32 != nullptr);
 
-  auto filter_type = op.filter().getType().cast<RankedTensorType>();
+  auto filter_type = op.getFilter().getType().cast<RankedTensorType>();
   auto new_type = RankedTensorType::get(filter_type.getShape(),
                                         rewriter.getIntegerType(8, fsign));
   if (fsign) {
@@ -126,23 +127,23 @@ void DeconvLowering::LoweringINT8(PatternRewriter &rewriter, top::DeconvOp op,
         top::WeightOp::create(op, "bias_int32", *bias_int32, new_type);
     operands.push_back(new_bias);
   } else {
-    operands.push_back(op.bias()); // none
+    operands.push_back(op.getBias()); // none
   }
 
   std::vector<NamedAttribute> attrs;
   for (auto &attr : op->getAttrs()) {
     attrs.push_back(attr);
   }
-  std::string deconv_name = Module::getName(op.getOperation()).str() + "_i32";
+  std::string deconv_name = module::getName(op.getOperation()).str() + "_i32";
   auto name = rewriter.getStringAttr(deconv_name);
-  attrs.push_back(rewriter.getNamedAttr("with_bias",
-                                        rewriter.getBoolAttr(param.with_bias)));
+  attrs.push_back(
+      rewriter.getNamedAttr("with_bias", rewriter.getBoolAttr(with_bias)));
   auto deconvType = RankedTensorType::get(
       {param.n, param.oc, param.oh, param.ow}, rewriter.getI32Type());
   auto deconvOp = rewriter.create<tpu::DeconvOp>(NameLoc::get(name), deconvType,
                                                  operands, attrs);
 
-  auto rqType = Quant::getQuantInt8Type(op.output(), asymmetric);
+  auto rqType = getQuantInt8Type(op.getOutput(), asymmetric);
 
   auto quant_int32 = std::make_shared<std::vector<int32_t>>(param.oc * 3, 0);
   int int32_multiplier, rshift;
@@ -166,50 +167,46 @@ void DeconvLowering::LoweringINT8(PatternRewriter &rewriter, top::DeconvOp op,
   attrs.push_back(rewriter.getNamedAttr(
       "quant_mode", tpu::RequantModeAttr::get(ctx, tpu::RequantMode::Normal)));
   operands.clear();
-  operands.push_back(deconvOp.output());
+  operands.push_back(deconvOp.getOutput());
   operands.push_back(new_quant);
   auto rqOp = rewriter.create<tpu::RequantIntAxisOp>(op->getLoc(), rqType,
                                                      operands, attrs);
-  rewriter.replaceOp(op, {rqOp.output()});
+  rewriter.replaceOp(op, {rqOp.getOutput()});
 }
 
 void DeconvLowering::LoweringBF16(PatternRewriter &rewriter,
                                   top::DeconvOp op) const {
-  auto ctx = getContext();
   std::vector<Value> operands;
-  const int nInputs = op->getNumOperands();
-  auto filterOp = cast<top::WeightOp>(op.filter().getDefiningOp());
-  operands.push_back(op.input());
+  auto filterOp = cast<top::WeightOp>(op.getFilter().getDefiningOp());
+  operands.push_back(op.getInput());
   operands.push_back(filterOp.clone_bf16(op));
-  operands.push_back(op.bias());
+  operands.push_back(op.getBias());
   std::vector<NamedAttribute> attrs;
   for (auto &attr : op->getAttrs()) {
     attrs.push_back(attr);
   }
-  bool with_bias = !op.bias().getType().isa<mlir::NoneType>();
+  bool with_bias = !op.getBias().getType().isa<mlir::NoneType>();
   attrs.push_back(
       rewriter.getNamedAttr("with_bias", rewriter.getBoolAttr(with_bias)));
-  auto newType = getQuantBF16Type(op.output());
+  auto newType = getQuantBF16Type(op.getOutput());
   rewriter.replaceOpWithNewOp<tpu::DeconvOp>(op, newType, operands, attrs);
 }
 
 void DeconvLowering::LoweringF16(PatternRewriter &rewriter,
                                  top::DeconvOp op) const {
-  auto ctx = getContext();
   std::vector<Value> operands;
-  const int nInputs = op->getNumOperands();
-  auto filterOp = cast<top::WeightOp>(op.filter().getDefiningOp());
-  operands.push_back(op.input());
+  auto filterOp = cast<top::WeightOp>(op.getFilter().getDefiningOp());
+  operands.push_back(op.getInput());
   operands.push_back(filterOp.clone_f16(op));
-  operands.push_back(op.bias());
+  operands.push_back(op.getBias());
   std::vector<NamedAttribute> attrs;
   for (auto &attr : op->getAttrs()) {
     attrs.push_back(attr);
   }
-  bool with_bias = !op.bias().getType().isa<mlir::NoneType>();
+  bool with_bias = !op.getBias().getType().isa<mlir::NoneType>();
   attrs.push_back(
       rewriter.getNamedAttr("with_bias", rewriter.getBoolAttr(with_bias)));
-  auto newType = getQuantF16Type(op.output());
+  auto newType = getQuantF16Type(op.getOutput());
   rewriter.replaceOpWithNewOp<tpu::DeconvOp>(op, newType, operands, attrs);
 }
 

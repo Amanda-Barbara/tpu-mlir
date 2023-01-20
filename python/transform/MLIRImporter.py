@@ -9,42 +9,78 @@ from mlir.ir import *
 
 
 class Top:
-    WeightOp = 'top.Weight'
-    InputOp = 'top.Input'
+    # NOTICE: Please add the Op alphabetically !!!
+    AbsOp = 'top.Abs'
     AddOp = 'top.Add'
+    AddConstOp = 'top.AddConst'
     AvgPoolOp = 'top.AvgPool'
     BatchNormOp = 'top.BatchNorm'
+    ClipOp = 'top.Clip'
     ConcatOp = 'top.Concat'
     ConvOp = 'top.Conv'
+    CompareOp = 'top.Compare'
+    CompareConstOp = 'top.CompareConst'
     Depth2SpaceOp = 'top.Depth2Space'
-    MulOp = 'top.Mul'
-    MulConstOp = 'top.MulConst'
+    DequantizeLinearOp = 'top.DequantizeLinear'
+    DeconvOp = 'top.Deconv'
+    DetectionOutputOp = 'top.DetectionOutput'
+    DivOp = 'top.Div'
+    ErfOp = 'top.Erf'
+    ExpOp = 'top.Exp'
+    GatherOp = 'top.Gather'
+    GRUOp = 'top.GRU'
+    HardSigmoidOp = 'top.HardSigmoid'
+    HardSwishOp = 'top.HardSwish'
+    InputOp = 'top.Input'
+    InterpOp = 'top.Interp'
+    LayerNormOp = 'top.LayerNorm'
+    LeakyReluOp = 'top.LeakyRelu'
+    LRNOp = 'top.LRN'
+    LSTMOp = 'top.LSTM'
+    LogOp = 'top.Log'
+    MaskedFillOp = 'top.MaskedFill'
     MatMulOp = 'top.MatMul'
     MaxPoolOp = 'top.MaxPool'
     MaxPoolWithMaskOp = 'top.MaxPoolWithMask'
     MaxUnpoolOp = 'top.MaxUnpool'
-    PermuteOp = 'top.Permute'
-    ReshapeOp = 'top.Reshape'
-    ReluOp = 'top.Relu'
-    SliceOp = 'top.Slice'
-    SigmoidOp = 'top.Sigmoid'
-    LeakyReluOp = 'top.LeakyRelu'
-    UpsampleOp = 'top.Upsample'
-    SoftmaxOp = 'top.Softmax'
-    LogOp = 'top.Log'
-    PadOp = 'top.Pad'
-    DivOp = 'top.Div'
-    SqueezeOp = 'top.Squeeze'
-    ClipOp = 'top.Clip'
-    DeconvOp = 'top.Deconv'
-    ScaleOp = 'top.Scale'
-    LSTMOp = 'top.LSTM'
-    GatherOp = 'top.Gather'
-    TileOp = 'top.Tile'
     MaxOp = 'top.Max'
     MinOp = 'top.Min'
-    AbsOp = 'top.Abs'
+    MishOp = 'top.Mish'
+    MulOp = 'top.Mul'
+    MulConstOp = 'top.MulConst'
+    NormalizeOp = 'top.Normalize'
+    PermuteOp = 'top.Permute'
+    PadOp = 'top.Pad'
+    PackOp = 'top.Pack'
+    PowOp = 'top.Pow'
+    PriorBoxOp = 'top.PriorBox'
     PReluOp = 'top.PRelu'
+    QuantizeLinearOp = 'top.QuantizeLinear'
+    Reciprocal = 'top.Reciprocal'
+    ReshapeOp = 'top.Reshape'
+    ReluOp = 'top.Relu'
+    ReduceOp = 'top.Reduce'
+    ReverseOp = 'top.Reverse'
+    SubOp = 'top.Sub'
+    SliceOp = 'top.Slice'
+    SigmoidOp = 'top.Sigmoid'
+    SoftmaxOp = 'top.Softmax'
+    SqueezeOp = 'top.Squeeze'
+    ScaleOp = 'top.Scale'
+    SubOp = 'top.Sub'
+    SplitOp = 'top.Split'
+    SqrtOp = 'top.Sqrt'
+    ShuffleChannelOp = 'top.ShuffleChannel'
+    TileOp = 'top.Tile'
+    TanhOp = 'top.Tanh'
+    UnpackOp = 'top.Unpack'
+    UpsampleOp = 'top.Upsample'
+    WeightOp = 'top.Weight'
+    WhereOp = 'top.Where'
+    YoloDetection = 'top.YoloDetection'
+    Proposal = 'top.Proposal'
+    ROIPooling = 'top.ROIPooling'
+    FrcnDetection = 'top.FrcnDetection'
 
 class State:
     TOP_F32 = 'TOP_F32'
@@ -145,12 +181,13 @@ class MLIRImporter(object):
             kargs: Dict
         """
         num_output = len(output_types)
-        if num_output == 1:
-            loc = Location.fused([Location.name(kargs['name'])])
+        names = kargs['name']
+        if isinstance(names, str):
+            loc = Location.fused([Location.name(names)])
+        elif isinstance(names, list):
+            loc = Location.fused([Location.name(n) for n in names])
         else:
-            assert (isinstance(kargs["name"], list))
-            assert (num_output == len(kargs["name"]))
-            loc = Location.fused([Location.name(n) for n in kargs["name"]])
+            raise RuntimeError("Unknown names:{}".format(names))
         del kargs["name"]
         op = Operation.create(
             op_type,
@@ -187,6 +224,8 @@ class MLIRImporter(object):
             param['pixel_format'] = StringAttr.get(kargs['pixel_format'])
         if 'channel_format' in kargs:
             param['channel_format'] = StringAttr.get(kargs['channel_format'])
+        if 'model_format' in kargs:
+            param['model_format'] = StringAttr.get(kargs['model_format'])
         op = Operation.create(Top.InputOp,
                               results=[self.input_types[index]],
                               operands=[self.func_args[index]],
@@ -219,12 +258,35 @@ class MLIRImporter(object):
             param['coeff'] = self.ArrayAttr(kargs['coeff'], 'F64')
         return self.buildOp(Top.AddOp, operands, [output_type], **param)
 
+    def create_sub_op(self, operands, output_shape, **kargs):
+        if len(operands) < 2:
+            raise RuntimeError("input operand must great than 2")
+        output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
+        param = {'name': kargs['name'], 'do_relu': BoolAttr.get(False)}
+        if "coeff" in kargs:
+            param['coeff'] = self.ArrayAttr(kargs['coeff'], 'F64')
+        return self.buildOp(Top.SubOp, operands, [output_type], **param)
+
     def create_mul_op(self, operands, output_shape, **kargs):
         if len(operands) < 2:
             raise RuntimeError("input operand must great than 2")
         output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
         param = {'name': kargs['name'], 'do_relu': BoolAttr.get(False)}
         return self.buildOp(Top.MulOp, operands, [output_type], **param)
+
+    def create_pow_op(self, operands, output_shape, **kargs):
+        output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
+        param = {'name': kargs['name'], 'exponent': FloatAttr.get_f64(kargs['exponent'])}
+        return self.buildOp(Top.PowOp, operands, [output_type], **param)
+
+    def create_add_const_op(self, operands, output_shape, **kargs):
+        output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
+        param = {
+            'name': kargs['name'],
+            'const_val': FloatAttr.get_f64(kargs['const_val']),
+            'do_relu': BoolAttr.get(False)
+        }
+        return self.buildOp(Top.AddConstOp, operands, [output_type], **param)
 
     def create_mul_const_op(self, operands, output_shape, **kargs):
         output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
@@ -373,6 +435,15 @@ class MLIRImporter(object):
         }
         return self.buildOp(Top.MatMulOp, operands, [output_type], **param)
 
+    def create_normalize_op(self, operands, output_shape, **kargs):
+        output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
+        param = {
+            'name': kargs['name'],
+            'across_spatial': BoolAttr.get(kargs['across_spatial']),
+            'channel_shared': BoolAttr.get(kargs['channel_shared']),
+        }
+        return self.buildOp(Top.NormalizeOp, operands, [output_type], **param)
+
     def create_relu_op(self, operands, output_shape, **kargs):
         output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
         param = {
@@ -390,6 +461,14 @@ class MLIRImporter(object):
     def create_reshape_op(self, operands, output_shape, **kargs):
         output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
         return self.buildOp(Top.ReshapeOp, operands, [output_type], name=kargs['name'])
+
+    def create_reverse_op(self, operands, output_shape, **kargs):
+        output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
+        param = {
+            'name': kargs['name'],
+            'axis': IntegerAttr.get(self.mlir_type['INT64'], kargs['axis'])
+        }
+        return self.buildOp(Top.ReverseOp, operands, [output_type], **param)
 
     def create_slice_op(self, operands, output_shape, **kargs):
         # get_value_type
@@ -420,6 +499,17 @@ class MLIRImporter(object):
         }
         return self.buildOp(Top.UpsampleOp, operands, [output_type], **param)
 
+    def create_interp_op(self, operands, output_shape, **kargs):
+        output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
+        param = {
+            'name': kargs['name'],
+            'scale_h': FloatAttr.get_f64(kargs['scale_h']),
+            'scale_w': FloatAttr.get_f64(kargs['scale_w']),
+            'mode': StringAttr.get(kargs['mode']),
+            'coord_mode': StringAttr.get(kargs['coordinate_transformation_mode'])
+        }
+        return self.buildOp(Top.InterpOp, operands, [output_type], **param)
+
     def create_maxunpool_op(self, operands, output_shape, **kargs):
         output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
         param = {
@@ -435,6 +525,8 @@ class MLIRImporter(object):
             'name': kargs['name'],
             'axis': IntegerAttr.get(self.mlir_type['INT64'], kargs['axis']),
         }
+        if 'log' in kargs:
+            param['log'] = BoolAttr.get(kargs['log'])
         return self.buildOp(Top.SoftmaxOp, operands, [output_type], **param)
 
     def create_log_op(self, operands, output_shape, **kargs):
@@ -443,6 +535,34 @@ class MLIRImporter(object):
             'name': kargs['name'],
         }
         return self.buildOp(Top.LogOp, operands, [output_type], **param)
+
+    def create_exp_op(self, operands, output_shape, **kargs):
+        output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
+        param = {
+            'name': kargs['name'],
+        }
+        return self.buildOp(Top.ExpOp, operands, [output_type], **param)
+
+    def create_tanh_op(self, operands, output_shape, **kargs):
+        output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
+        param = {
+            'name': kargs['name'],
+        }
+        return self.buildOp(Top.TanhOp, operands, [output_type], **param)
+
+    def create_mish_op(self, operands, output_shape, **kargs):
+        output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
+        param = {
+            'name': kargs['name'],
+        }
+        return self.buildOp(Top.MishOp, operands, [output_type], **param)
+
+    def create_erf_op(self, operands, output_shape, **kargs):
+        output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
+        param = {
+            'name': kargs['name'],
+        }
+        return self.buildOp(Top.ErfOp, operands, [output_type], **param)
 
     def create_pad_op(self, operands, output_shape, **kargs):
         output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
@@ -460,6 +580,17 @@ class MLIRImporter(object):
         output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
         param = {'name': kargs['name'], 'do_relu': BoolAttr.get(False)}
         return self.buildOp(Top.DivOp, operands, [output_type], **param)
+
+    def create_reciprocal_op(self, operands, output_shape, **kargs):
+        if len(operands) != 1:
+            raise RuntimeError("input operand must be 1")
+        output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
+        param = {
+            "name": kargs["name"],
+            "do_relu": BoolAttr.get(False),
+            "const_val": FloatAttr.get_f64(kargs["const_val"]),
+        }
+        return self.buildOp(Top.Reciprocal, operands, [output_type], **param)
 
     def create_squeeze_op(self, operands, output_shape, **kargs):
         output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
@@ -507,15 +638,54 @@ class MLIRImporter(object):
         param = {'name': kargs['name'], 'do_relu': BoolAttr.get(False)}
         return self.buildOp(Top.ScaleOp, operands, [output_type], **param)
 
-    def create_lstm_op(self, operands, output_shape, **kargs):
+    def create_lrn_op(self, operands, output_shape, **kargs):
         output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
         param = {
+            "name": kargs["name"],
+            "size": IntegerAttr.get(self.mlir_type["INT64"], kargs["size"]),
+        }
+
+        def add_if_has(key):
+            if key in kargs:
+                param[key] = FloatAttr.get_f64(kargs[key])
+
+        add_if_has("alpha")
+        add_if_has("beta")
+        add_if_has("bias")
+
+        return self.buildOp(Top.LRNOp, operands, [output_type], **param)
+
+    def create_gru_op(self, operands, out_shapes, **kargs):
+        out_types = list()
+        for s in out_shapes:
+            if len(s) == 0:
+                out_types.append(NoneType.get())
+            else:
+                t = RankedTensorType.get(tuple(s), self.get_value_type(operands[0]))
+                out_types.append(t)
+        param = {
             'name': kargs['name'],
-            'have_bias': BoolAttr.get(kargs['have_bias']),
+            'hidden_size': IntegerAttr.get(self.mlir_type["INT64"], kargs["hidden_size"]),
             'bidirectional': BoolAttr.get(kargs['bidirectional']),
             'batch_first': BoolAttr.get(kargs['batch_first']),
         }
-        return self.buildOp(Top.LSTMOp, operands, [output_type], **param)
+        return self.buildOp(Top.GRUOp, operands, out_types, **param)
+
+    def create_lstm_op(self, operands, out_shapes, **kargs):
+        out_types = list()
+        for s in out_shapes:
+            if len(s) == 0:
+                out_types.append(NoneType.get())
+            else:
+                t = RankedTensorType.get(tuple(s), self.get_value_type(operands[0]))
+                out_types.append(t)
+        param = {
+            'name': kargs['name'],
+            'hidden_size': IntegerAttr.get(self.mlir_type["INT64"], kargs["hidden_size"]),
+            'bidirectional': BoolAttr.get(kargs['bidirectional']),
+            'batch_first': BoolAttr.get(kargs['batch_first']),
+        }
+        return self.buildOp(Top.LSTMOp, operands, out_types, **param)
 
     def create_gather_op(self, operands, output_shape, **kargs):
         output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
@@ -560,6 +730,220 @@ class MLIRImporter(object):
         output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
         param = {'name': kargs['name']}
         return self.buildOp(Top.PReluOp, operands, [output_type], **param)
+
+    def create_reduce_op(self, operands, output_shape, **kargs):
+        """
+            operands: List[pybind.op]
+            output_tensorshape: List[int] output tensor type
+            attrs: Dict, about op attrs
+        """
+        # get_value_type
+        output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
+        param = {
+            'name': kargs['name'],
+            'axes': self.ArrayAttr(kargs['axes']),
+            'keepdims': IntegerAttr.get(self.mlir_type['INT64'], kargs['keepdims']),
+            'mode': StringAttr.get(kargs['mode']),
+        }
+        return self.buildOp(Top.ReduceOp, operands, [output_type], **param)
+
+    def create_sqrt_op(self, operands, output_shape, **kargs):
+        # get_value_type
+        output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
+        param = {'name': kargs['name']}
+        return self.buildOp(Top.SqrtOp, operands, [output_type], **param)
+
+    def create_where_op(self, operands, output_shape, **kargs):
+        # get_value_type
+        output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
+        param = {'name': kargs['name']}
+        return self.buildOp(Top.WhereOp, operands, [output_type], **param)
+
+    def create_masked_fill_op(self, operands, output_shape, **kargs):
+        # get_value_type
+        output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
+        param = {
+            'name': kargs['name'],
+            'inversed': BoolAttr.get(kargs['inversed']),
+            'const_val': FloatAttr.get_f64(kargs['const_val'])
+        }
+        return self.buildOp(Top.MaskedFillOp, operands, [output_type], **param)
+
+    def create_compare_op(self, operands, output_shape, **kargs):
+        # get_value_type
+        output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
+        param = {'name': kargs['name'], 'mode': StringAttr.get(kargs['mode'])}
+        return self.buildOp(Top.CompareOp, operands, [output_type], **param)
+
+    def create_compare_const_op(self, operands, output_shape, **kargs):
+        # get_value_type
+        output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
+        param = {
+            'name': kargs['name'],
+            'mode': StringAttr.get(kargs['mode']),
+            'const_val': FloatAttr.get_f64(kargs['const_val']),
+            'inversed': BoolAttr.get(kargs['inversed'])
+        }
+        return self.buildOp(Top.CompareConstOp, operands, [output_type], **param)
+
+    def create_hsigmoid_op(self, operands, output_shape, **kargs):
+        # get_value_type
+        output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
+        param = {
+            'name': kargs['name'],
+            'alpha': FloatAttr.get_f64(kargs['alpha']),
+            'beta': FloatAttr.get_f64(kargs['beta'])
+        }
+        return self.buildOp(Top.HardSigmoidOp, operands, [output_type], **param)
+
+    def create_hswish_op(self, operands, output_shape, **kargs):
+        # get_value_type
+        output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
+        param = {'name': kargs['name']}
+        return self.buildOp(Top.HardSwishOp, operands, [output_type], **param)
+
+    def create_priorbox_op(self, operands, output_shape, **kargs):
+        # get_value_type
+        output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
+        param = {
+            'name': kargs['name'],
+            'min_size': self.ArrayAttr(kargs['min_size'], 'F64'),
+            'max_size': self.ArrayAttr(kargs['max_size'], 'F64'),
+            'aspect_ratios': self.ArrayAttr(kargs['aspect_ratios'], 'F64'),
+            'variance': self.ArrayAttr(kargs['variance'], 'F64'),
+            'clip': BoolAttr.get(kargs['clip']),
+            'step_h': FloatAttr.get_f64(kargs['step_h']),
+            'step_w': FloatAttr.get_f64(kargs['step_w']),
+            'img_h': IntegerAttr.get(self.mlir_type['INT64'], int(kargs['step_h'])),
+            'img_w': IntegerAttr.get(self.mlir_type['INT64'], int(kargs['step_w'])),
+            'offset': FloatAttr.get_f64(kargs['offset']),
+            'num_priors': IntegerAttr.get(self.mlir_type['INT64'], kargs['num_priors']),
+            'use_default_aspect_ratio': BoolAttr.get(kargs['use_default_aspect_ratio']),
+        }
+        return self.buildOp(Top.PriorBoxOp, operands, [output_type], **param)
+
+    def create_detection_output_op(self, operands, output_shape, **kargs):
+        output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
+        param = {
+            'name':
+            kargs['name'],
+            'num_classes':
+            IntegerAttr.get(self.mlir_type['INT64'], kargs['num_classes']),
+            'share_location':
+            BoolAttr.get(kargs['share_location']),
+            'background_label_id':
+            IntegerAttr.get(self.mlir_type['INT64'], kargs['background_label_id']),
+            'nms_threshold':
+            FloatAttr.get_f64(kargs['nms_threshold']),
+            'top_k':
+            IntegerAttr.get(self.mlir_type['INT64'], kargs['top_k']),
+            'code_type':
+            StringAttr.get(kargs['code_type']),
+            'keep_top_k':
+            IntegerAttr.get(self.mlir_type['INT64'], kargs['keep_top_k']),
+            'confidence_threshold':
+            FloatAttr.get_f64(kargs['confidence_threshold']),
+        }
+        return self.buildOp(Top.DetectionOutputOp, operands, [output_type], **param)
+
+    def create_yolo_detection_op(self, operands, output_shape, **kargs):
+        output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
+        param = {
+            'name': kargs['name'],
+            'class_num': IntegerAttr.get(self.mlir_type['INT64'], kargs['class_num']),
+            'net_input_h': IntegerAttr.get(self.mlir_type['INT64'], kargs['net_input_h']),
+            'net_input_w': IntegerAttr.get(self.mlir_type['INT64'], kargs['net_input_w']),
+            'keep_topk': IntegerAttr.get(self.mlir_type['INT64'], kargs['keep_topk']),
+            'spp_net': BoolAttr.get(kargs['spp_net']),
+            'tiny': BoolAttr.get(kargs['tiny']),
+            'yolo_v4': BoolAttr.get(kargs['yolo_v4']),
+            'nms_threshold': FloatAttr.get_f64(kargs['nms_threshold']),
+            'obj_threshold': FloatAttr.get_f64(kargs['obj_threshold']),
+            'anchors': StringAttr.get(kargs['anchors']),
+        }
+        return self.buildOp(Top.YoloDetection, operands, [output_type], **param)
+
+    def create_shuffle_channel_op(self, operands, output_shape, **kargs):
+        output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
+        param = {
+            'name': kargs['name'],
+            'group': IntegerAttr.get(self.mlir_type['INT64'], kargs['group']),
+        }
+        return self.buildOp(Top.ShuffleChannelOp, operands, [output_type], **param)
+
+    def create_proposal_op(self, operands, output_shape, **kargs):
+        output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
+        param = {
+            'name': kargs['name'],
+            'net_input_h': IntegerAttr.get(self.mlir_type['INT64'], kargs['net_input_h']),
+            'net_input_w': IntegerAttr.get(self.mlir_type['INT64'], kargs['net_input_w']),
+            'feat_stride': IntegerAttr.get(self.mlir_type['INT64'], kargs['feat_stride']),
+            'anchor_base_size': IntegerAttr.get(self.mlir_type['INT64'], kargs['anchor_base_size']),
+            'rpn_obj_threshold': FloatAttr.get_f64(kargs['rpn_obj_threshold']),
+            'rpn_nms_threshold': FloatAttr.get_f64(kargs['rpn_nms_threshold']),
+            'rpn_nms_post_top_n': IntegerAttr.get(self.mlir_type['INT64'],
+                                                  kargs['rpn_nms_post_top_n'])
+        }
+        return self.buildOp(Top.Proposal, operands, [output_type], **param)
+
+    def create_roipooling_op(self, operands, output_shape, **kargs):
+        output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
+        param = {
+            'name': kargs['name'],
+            'pooled_h': IntegerAttr.get(self.mlir_type['INT64'], kargs['pooled_h']),
+            'pooled_w': IntegerAttr.get(self.mlir_type['INT64'], kargs['pooled_w']),
+            'spatial_scale': FloatAttr.get_f64(kargs['spatial_scale'])
+        }
+        return self.buildOp(Top.ROIPooling, operands, [output_type], **param)
+
+    def create_frcn_detection_op(self, operands, output_shape, **kargs):
+        output_type = RankedTensorType.get(tuple(output_shape), self.get_value_type(operands[0]))
+        param = {
+            'name': kargs['name'],
+            'class_num': IntegerAttr.get(self.mlir_type['INT64'], kargs['class_num']),
+            'keep_topk': IntegerAttr.get(self.mlir_type['INT64'], kargs['keep_topk']),
+            'obj_threshold': FloatAttr.get_f64(kargs['obj_threshold']),
+            'nms_threshold': FloatAttr.get_f64(kargs['nms_threshold']),
+        }
+        return self.buildOp(Top.FrcnDetection, operands, [output_type], **param)
+
+    def create_qlinear_op(self, operands, output_shape, axis=1, **kargs):
+        # get_value_type
+        output_type = RankedTensorType.get(tuple(output_shape), self.mlir_type['SINT8'])
+        param = {
+            'name': kargs['name'],
+            'y_scale': self.ArrayAttr(kargs['y_scale'], 'F64'),
+            'y_zero_point': self.ArrayAttr(kargs['y_zero_point'], 'INT32'),
+            'axis': IntegerAttr.get(self.mlir_type['INT64'], axis)
+        }
+        return self.buildOp(Top.QuantizeLinearOp, operands, [output_type], **param)
+
+    def create_deqlinear_op(self, operands, output_shape, axis=1, **kargs):
+        # get_value_type
+        output_type = RankedTensorType.get(tuple(output_shape), self.mlir_type['F32'])
+        param = {
+            'name': kargs['name'],
+            'x_scale': self.ArrayAttr(kargs['x_scale'], 'F64'),
+            'x_zero_point': self.ArrayAttr(kargs['x_zero_point'], 'INT32'),
+            'axis': IntegerAttr.get(self.mlir_type['INT64'], axis)
+        }
+        return self.buildOp(Top.DequantizeLinearOp, operands, [output_type], **param)
+
+    def create_layer_norm_op(self, operands, output_shapes, **kargs):
+        # get_value_type
+        out_types = list()
+        for s in output_shapes:
+            if len(s) == 0:
+                out_types.append(NoneType.get())
+            else:
+                t = RankedTensorType.get(tuple(s), self.get_value_type(operands[0]))
+                out_types.append(t)
+        param = {
+            'name': kargs['name'],
+            'axis': IntegerAttr.get(self.mlir_type['INT64'], kargs['axis']),
+            'eps': FloatAttr.get_f64(kargs['eps'])
+        }
+        return self.buildOp(Top.LayerNormOp, operands, out_types, **param)
 
     def print_module(self):
         mlir_format = self.mlir_module.operation.get_asm(enable_debug_info=True)

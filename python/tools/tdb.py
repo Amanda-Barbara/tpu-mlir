@@ -8,7 +8,7 @@
 #
 # ==============================================================================
 from bmodel_dis import Bmodel2MLIR, opdef_1684x, tensor2memref
-from utils.cmodel import lib
+from utils.cmodel import lib, gen_lookup_table
 import cmd
 import ctypes
 import traceback
@@ -90,8 +90,8 @@ class Tdb(cmd.Cmd):
 
     def __init__(self, completekey="tab", stdin=None, stdout=None):
         cmd.Cmd.__init__(self, completekey, stdin, stdout)
-        self.ddr = None
-        self.lmem = None
+        self.ddr = np.ndarray([])
+        self.lmem = np.ndarray([])
         self.record_status = False
         self.model = None
         self.current_function = None
@@ -122,8 +122,11 @@ class Tdb(cmd.Cmd):
         self.lmem = c_array_to_ndarray(
             lib.get_local_mem(0).contents.raw_ptr, (64, 16, 1024 * 16)
         )
+        self.smem = c_array_to_ndarray(lib.get_static_memaddr_by_node(0), (16 * 1024,))
         self.ddr[...] = 0
         self.lmem[...] = 0
+        lut = np.array(gen_lookup_table(), np.uint32).view(np.uint8)
+        self.smem[: len(lut)] = lut[...]
 
     def message(self, msg):
         print(msg, file=self.stdout)
@@ -164,6 +167,7 @@ class Tdb(cmd.Cmd):
         Continue execution, only stop when a breakpoint is encountered.
         """
         try:
+            self.next()
             while self.current_line not in self.breakpoint:
                 self.next()
         except ValueError:
@@ -272,10 +276,11 @@ class Tdb(cmd.Cmd):
             raise Exception("Not implemented.")
 
     def get_data(self, mem: opdef_1684x.MemRef):
-        m_type = mem.addr_str[1]
+        m_type = mem.mem_type
         if m_type == "L":
             raise Exception("Not implemented.")
         if m_type == "G":
+            # TODO stride layout
             offset = mem.addr - opdef_1684x.memmap["G"][0]
             size = int(np.prod(mem.shape)) * np.dtype(mem.np_dtype).itemsize
             return (
@@ -284,29 +289,44 @@ class Tdb(cmd.Cmd):
                 .reshape(mem.shape)
                 .copy()
             )
+        if m_type == "R":
+            # TODO: switch to stride
+            offset = mem.addr - opdef_1684x.memmap["R"][0]
+            tpu_lmem_size = opdef_1684x.bank_size * 16
+            tpu_offset = offset // tpu_lmem_size
+            offset = offset % tpu_lmem_size
+            lmem = self.lmem.reshape(64, -1)
+            n, c, h, w = mem.shape
+            dtype_size = np.dtype(mem.np_dtype).itemsize
+            spacial_size = h * w * dtype_size
+            tensor = lmem[:, offset : offset + spacial_size * int(np.ceil(c / 64)) * n]
+            tensor = tensor.reshape(n, -1, spacial_size)[
+                :, tpu_offset : tpu_offset + c, :
+            ]
+            return tensor.copy().view(mem.np_dtype).reshape(n, c, h, w)
 
     def get_return(self):
         outputs = self.current_function.signature[1]
         mems = [tensor2memref(x) for x in outputs]
         return [self.get_data(mem) for mem in mems]
 
-    def get_curernt_op(self):
+    def get_op(self, offset=0):
         ops = self.current_function.regions[0].blocks[0].operations
-        if self.current_line < len(ops):
-            return ops[self.current_line]
+        if self.current_line + offset < len(ops):
+            return ops[self.current_line + offset]
         raise ValueError("end of execution.")
 
     def push_status(self):
         if not self.record_status:
             return
-        op = self.get_curernt_op()
+        op = self.get_op()
         self.status[self.current_line] = self.get_data(op.results[0])
 
     def pop_status(self):
         if not self.record_status:
             raise Exception("No records, can not go back.")
 
-        op = self.get_curernt_op()
+        op = self.get_op()
         if self.current_line not in self.status:
             raise Exception("can not go back.")
         status = self.status[self.current_line]
@@ -330,7 +350,7 @@ class Tdb(cmd.Cmd):
     def next(self):
         self.push_status()
         try:
-            op = self.get_curernt_op()
+            op = self.get_op()
             op.compute()
             self.current_line += 1
         except ValueError as e:

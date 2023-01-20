@@ -75,6 +75,11 @@ link_directories(${NNTOOLCHAIN_PATH}/lib)
 set(CV18XX_PATH ${PROJECT_SOURCE_DIR}/third_party/CV18xx)
 include_directories(${CV18XX_PATH}/include)
 link_directories(${CV18XX_PATH}/lib)
+#-------------------------------------------------------------------------------
+# PROGRESSBAR Configuration
+#-------------------------------------------------------------------------------
+set(PROGRESSBAR_PATH ${PROJECT_SOURCE_DIR}/third_party/progressbar)
+include_directories(${PROGRESSBAR_PATH}/include)
 
 OPTION (USE_OpenMP "Use OpenMP" ON)
 IF(USE_OpenMP)
@@ -109,7 +114,8 @@ message(STATUS "tpu-mlir version: ${MLIR_VERSION}")
 add_definitions(-DMLIR_VERSION="${MLIR_VERSION}")
 #-------------------------------------------------------------------------------
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC -Werror -Wno-unused-result")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC -Werror -Wno-unused-result -Wreturn-type -Wunused-variable")
+message(STATUS "CMAKE_CXX_FLAGS: ${CMAKE_CXX_FLAGS}")
 add_subdirectory(include)
 add_subdirectory(third_party)
 add_subdirectory(lib)

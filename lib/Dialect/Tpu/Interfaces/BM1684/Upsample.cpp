@@ -9,24 +9,23 @@
 
 #include "tpu_mlir/Dialect/Tpu/IR/TpuOps.h"
 #include "tpu_mlir/Backend/BM168x/BM1684.h"
-#include "tpu_mlir/Support/Helper/Quant.h"
-#include "tpu_mlir/Support/Helper/Module.h"
 
-using namespace mlir;
-using namespace tpu_mlir;
-using namespace tpu_mlir::helper;
+#include "tpu_mlir/Support/Module.h"
+
+
+
 using namespace tpu_mlir::backend;
 
 void tpu::UpsampleOp::codegen_global_bm1684() {
   int64_t n, c, h, w;
-  assert(scale_h() == scale_w());
-  Module::getNCHW(input(), n, c, h, w);
+  assert(getScaleH() == getScaleW());
+  module::getNCHW(getInput(), n, c, h, w);
   BM1684::instance().dl_nodechip_upsample_forward_parallel_fix8b(
-      Module::getAddress(input()),
-      Module::getAddress(output()),
+      module::getAddress(getInput()),
+      module::getAddress(getOutput()),
       n, c, h, w,
-      scale_h(),
-      do_relu() ? 1 : 0,
+      getScaleH(),
+      getDoRelu() ? 1 : 0,
       (CMD_ID_NODE*)BM1684::instance().cmdid_node
   );
 }
@@ -40,11 +39,11 @@ int64_t tpu::UpsampleOp::getBufferSize_bm1684(int64_t in_lmem_bytes,
 }
 
 void tpu::UpsampleOp::codegen_local_bm1684(int64_t n_step, int64_t h_step) {
-  auto out_ginfo = LocalGenInterface::getGroupInfo(output());
+  auto out_ginfo = LocalGenInterface::getGroupInfo(getOutput());
   int64_t n, c, h, w;
-  Module::getNCHW(input(), n, c, h, w);
-  int scale = scale_h();
-  assert(scale == scale_w());
+  module::getNCHW(getInput(), n, c, h, w);
+  int scale = getScaleH();
+  assert(scale == getScaleW());
 
   llvm::SmallVector<int, 4> input_shape;
   llvm::SmallVector<int, 4> output_shape;
@@ -54,16 +53,16 @@ void tpu::UpsampleOp::codegen_local_bm1684(int64_t n_step, int64_t h_step) {
   input_shape.push_back(w);
   output_shape.push_back(n);
   output_shape.push_back(c);
-  output_shape.push_back(scale_h() * h);
-  output_shape.push_back(scale_w() * w);
+  output_shape.push_back(getScaleH() * h);
+  output_shape.push_back(getScaleW() * w);
   BM1684::instance().dl_nodechip_upsample_fix8b_forward_local(
-      Module::getAddress(input()),
-      Module::getAddress(output()),
+      module::getAddress(getInput()),
+      module::getAddress(getOutput()),
       input_shape.data(),
       output_shape.data(),
       scale,
       0, 1, 1, 1, 1,
       (CMD_ID_NODE*)BM1684::instance().cmdid_node,
-      do_relu() ? 1 : 0
+      getDoRelu() ? 1 : 0
   );
 }

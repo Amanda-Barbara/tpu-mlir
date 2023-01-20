@@ -9,12 +9,10 @@
 
 #include "tpu_mlir/Dialect/Top/IR/TopOps.h"
 #include "tpu_mlir/Support/Dnnl/Dnnl.h"
-#include "tpu_mlir/Support/Helper/Module.h"
+#include "tpu_mlir/Support/Module.h"
 #include "tpu_mlir/Support/MathUtils.h"
 
-using namespace tpu_mlir;
-using namespace tpu_mlir::helper;
-using namespace mlir;
+
 
 int64_t top::TileOp::getFLOPs() { return 0; }
 
@@ -22,11 +20,11 @@ LogicalResult top::TileOp::init(InferenceParameter &p) { return success(); }
 void top::TileOp::deinit(InferenceParameter &p) {}
 
 LogicalResult top::TileOp::inference(InferenceParameter &p) {
-  auto num_elem = Module::getNumElements(output());
-  auto out_shape = Module::getShape(output());
-  auto in_shape = Module::getShape(input());
-  auto axis_ = axis();
-  int tile_ = tile();
+  auto out_shape = module::getShape(getOutput());
+  auto in_shape = module::getShape(getInput());
+  auto signed_axis = getAxisAttr().getValue().getSExtValue();
+  auto axis_ = signed_axis > 0 ? signed_axis : 0;
+  int tile_ = getTile();
   auto outer_count = std::accumulate(in_shape.begin(), in_shape.begin() + axis_,
                                      1, std::multiplies<int64_t>());
   auto inner_count = std::accumulate(in_shape.begin() + axis_, in_shape.end(),

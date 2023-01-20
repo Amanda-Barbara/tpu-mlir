@@ -9,11 +9,9 @@
 
 #include "tpu_mlir/Dialect/Top/IR/TopOps.h"
 #include "tpu_mlir/Support/Dnnl/Dnnl.h"
-#include "tpu_mlir/Support/Helper/Module.h"
+#include "tpu_mlir/Support/Module.h"
 
-using namespace tpu_mlir;
-using namespace tpu_mlir::helper;
-using namespace mlir;
+
 
 int64_t top::PermuteOp::getFLOPs() { return 0; }
 
@@ -40,9 +38,9 @@ static void refresh(std::vector<int> &order, int idx) {
 }
 
 LogicalResult top::PermuteOp::inference(InferenceParameter &p) {
-  int64_t in, ic, ih, iw, on, oc, oh, ow;
-  std::vector<int64_t> in_shape = Module::getShape(input());
-  std::shared_ptr<std::vector<int64_t>> perm = Module::getI64Array(order());
+  int64_t in, ic, ih, iw;
+  std::vector<int64_t> in_shape = module::getShape(getInput());
+  i64_array_t perm = module::getI64Array(getOrder());
   int num_dims = in_shape.size();
   std::vector<int> order;
   for (int i = 0; i < num_dims; i++) {
@@ -81,10 +79,22 @@ LogicalResult top::PermuteOp::inference(InferenceParameter &p) {
     if (num_dims > 4) {
       llvm_unreachable("permute shape not support");
     }
+  } else if (num_dims < 4) {
+    //reshape to 4 dims
+    int inserted_dims = 4 - num_dims;
+    in_shape.reserve(4);
+    order.reserve(4);
+    for (int i = 0; i < inserted_dims; i++) {
+      in_shape.insert(in_shape.begin(), 1);
+      order.insert(order.begin(), 1);
+    }
+
+    for (int i = inserted_dims; i < 4; i++) {
+      order[i] += inserted_dims;
+    }
   }
 
   in = in_shape[0], ic = in_shape[1], ih = in_shape[2], iw = in_shape[3];
-  int64_t size = in * ic * ih * iw;
 
   for (int n = 0; n < in; n++) {
     for (int c = 0; c < ic; c++) {
