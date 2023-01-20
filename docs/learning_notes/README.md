@@ -26,7 +26,7 @@
 ```text
 1. Lowering: 编译器为模型生成硬件机器码，让模型可以在特定硬件上运行。
 2. Optimizing: 优化模型在硬件上的运行效率
-在“降低”(Lowering)代码以便将模型运行到所选硬件后，可能会遇到的一个问题是性能。接下来就是`Optimizing`过程，Codegen 非常善于将 IR 降低到机器代码，但是根据目标硬件后端的不同，生成的机器代码可能不能执行得很好，生成的代码可能没有利用数据本地化和硬件缓存，也可能没有利用可以提高代码速度的向量或并行操作等高级特性。
+在“降低”(Lowering)代码以便将模型运行到所选硬件后，可能会遇到的一个问题是性能。接下来就是`Optimizing`过程，Codegen 非常善于将 IR 降低到机器代码，但是根据目标硬件后端的不同，生成的机器代码可能不能执行得很好，生成的代码可能没有利用数据本地化和硬件缓存，也可能没有利用可以提高代码速度的向量或并行操作等高级特性。使用图优化技术结合硬件特性来研究如何将代码编译到某个特定的目标硬件加速运行。
 ```
 
 ## `LLVM`
@@ -55,3 +55,5 @@
 * 1 [`tpu-mlir`总体介绍](https://tpumlir.org/zh-cn/2022/08/26/tpu-mlir-zheng-shi-kai-yuan-gen-suan-neng-yi-qi-da-zao-xia-yi-dai-ai-bian-yi-qi.html)
 * 2 [`tpu-mlir`官方文档](https://tpumlir.org/)
 * 3 [`AI`编译器呼之欲出的需求与困境](https://tpumlir.org/zh-cn/2022/10/31/ai-bian-yi-qi-wei-he-chong-yao-mlir-you-na-xie-you-shi-yi.html)
+* 4 [对`TVM`创始人的采访](https://mp.weixin.qq.com/s/5OL6oPZJ0T6EcDL7e1XaPA)
+* 
