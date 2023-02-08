@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="PublishConfigData" remoteFilesAllowedToDisappearOnAutoupload="false">
+    <serverData>
+      <paths name="sophon-arm (44854c69-916d-46b7-9d24-59aa167fdce5)">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/tmp/tmp.i02vehj1GG" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
+    </serverData>
+  </component>
+</project>

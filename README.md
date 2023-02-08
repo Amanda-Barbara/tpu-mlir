@@ -20,7 +20,9 @@ After cloning the code of this project, it needs to be compiled in docker.
 docker pull sophgo/tpuc_dev:latest
 
 # myname1234 just a example, you can set your own name
+# docker run --privileged --name myname1234 -v $PWD:/workspace -it sophgo/tpuc_dev:latest
 docker run --privileged --name myname1234 -v $PWD:/workspace -it sophgo/tpuc_dev:latest
+sudo docker run -it -dp 8888:22 --name tpu_mlir_zjw -v $PWD:/workspace -it sophgo/tpuc_dev:latest
 ```
 
 After the container is created, the directory of the code in docker should be `/workspace/tpu-mlir`.
